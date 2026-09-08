@@ -7,6 +7,7 @@ tests/test_gallery_service.py
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,6 +136,51 @@ class TestListCategories:
         wnacg_cat = next(c for c in cats if c["name"] == "wnacg")
         assert wnacg_cat["item_count"] == 2
         assert wnacg_cat["mode"] == "doujinshi"
+
+    def test_general_category_item_count_is_direct_children_count(self, tmp_download_dir: Path):
+        """裁定 2026-09-07（@PM 待回答 #53 item 3(b)）：一般模式來源的
+        item_count = 直接子項目數，不是遞迴葉節點總數。30 個子資料夾、每個
+        50 個檔案，必須顯示 30，不是 30*50=1500——用縮小過的檔案數（原始裁定
+        舉例是 500）換取測試速度，比例關係不變，足以證明沒有遞迴進子資料夾。"""
+        cat = tmp_download_dir / "bigsource"
+        cat.mkdir()
+        for i in range(30):
+            sub = cat / f"B{i:02d}"
+            sub.mkdir()
+            for j in range(50):
+                (sub / f"{j:03d}.jpg").write_bytes(b"i")
+        cats = gallery_service.list_categories()
+        bigsource = next(c for c in cats if c["name"] == "bigsource")
+        assert bigsource["item_count"] == 30
+        assert bigsource["mode"] == "general"
+
+    def test_general_non_empty_check_stops_at_first_item_no_full_walk(self, tmp_download_dir: Path):
+        """裁定 2026-09-07（@PM 待回答 #53 item 3(a)）：一般模式的「這個分類
+        是不是非空」判斷必須在找到第一個項目就停，不能遞迴進子資料夾做全樹
+        掃描。這裡把唯一的檔案埋在兩層子資料夾底下（cat/sub1/sub2/deep.jpg），
+        用 spy 包住 os.scandir 證明：整個 list_categories() 呼叫期間，
+        scandir 只對 `cat` 本身呼叫過（一次來自非空檢查、一次來自直接子項目
+        計數），從未進入 sub1 或 sub1/sub2 —— 這正是「不是 O(全部檔案)，而是
+        O(直接子項目)」的證據，而不只是最後數字剛好對了。"""
+        cat = tmp_download_dir / "deepsource"
+        cat.mkdir()
+        nested = cat / "sub1" / "sub2"
+        nested.mkdir(parents=True)
+        (nested / "deep.jpg").write_bytes(b"i")
+
+        real_scandir = os.scandir
+        calls: list[Path] = []
+
+        def _spy_scandir(path, *args, **kwargs):
+            calls.append(Path(path))
+            return real_scandir(path, *args, **kwargs)
+
+        with patch("app.services.gallery_service.os.scandir", side_effect=_spy_scandir):
+            cats = gallery_service.list_categories()
+
+        deepsource = next(c for c in cats if c["name"] == "deepsource")
+        assert deepsource["item_count"] == 1  # only "sub1" is a direct child
+        assert calls == [cat, cat]  # never scanned sub1/ or sub1/sub2/
 
 
 class TestListItems:

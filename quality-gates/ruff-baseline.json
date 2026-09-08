@@ -44,7 +44,6 @@
   "tests/test_gallery_dl_error_capture.py|RUF059|Unpacked variable `downloaded` is never used",
   "tests/test_gallery_dl_error_capture.py|RUF059|Unpacked variable `skipped` is never used",
   "tests/test_gallery_service.py|F401|`pytest` imported but unused",
-  "tests/test_gallery_service.py|F401|`unittest.mock.patch` imported but unused",
   "tests/test_gallery_service.py|I001|Import block is un-sorted or un-formatted",
   "tests/test_meta_preservation.py|F401|`pytest` imported but unused"
 ]
