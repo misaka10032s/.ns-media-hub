@@ -128,22 +128,73 @@ def _count_immediate_subdirs(folder: Path) -> int:
     return count
 
 
+def _has_any_child(folder: Path) -> bool:
+    """Non-empty check for a GENERAL-mode source — stops at the FIRST
+    qualifying (non-hidden) direct entry; never recurses into a
+    sub-directory and never walks the full tree. Ruling 2026-09-07 (@PM
+    待回答 #53 item 3, item (a)): the old check reused _iter_leaf_items(),
+    which recursed through every nested file just to answer a yes/no
+    question — on a real DOWNLOAD_DIR (~182k files / ~3k dirs / 126
+    top-level categories) that meant every /api/gallery request paid for a
+    full recursive walk just to find out a category has at least one
+    item."""
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if entry.name.startswith("."):
+                    continue
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _count_immediate_children(folder: Path) -> int:
+    """item_count for a GENERAL-mode source = count of DIRECT children only
+    (files + sub-directories; hidden entries excluded, same filter as
+    _iter_leaf_items/_folder_has_only_files), via a single non-recursive
+    os.scandir pass — no per-entry stat beyond DirEntry.name. Ruling
+    2026-09-07 (@PM 待回答 #53 item 3, item (b)): a top-level folder with 30
+    sub-folders of 500 files each now shows 30, NOT 30*500=15000 — the old
+    _iter_leaf_items() recursed all the way to leaf files to build that
+    number. This deliberately does NOT recurse to find "real" leaf items
+    the way _iter_leaf_items does: a sub-directory counts as ONE item
+    regardless of what (or how much) is nested inside it. list_items() is
+    unchanged and still does the real recursive leaf walk when a category
+    is actually opened — only the category-list badge number changed."""
+    count = 0
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if entry.name.startswith("."):
+                    continue
+                count += 1
+    except OSError:
+        return 0
+    return count
+
+
 def list_categories() -> list[dict]:
     """Return top-level category directories under DOWNLOAD_DIR that have at
     least one item — a source with zero items (an empty leftover folder,
     e.g. one whose downloads were later reassigned by a new
     path_service.CATEGORY_ALIASES entry) is not offered at all. The
     underlying folder is NEVER deleted (read-only browsing only) — this
-    only affects what gets listed. The check costs nothing extra: item_count
-    is already computed for every category below, this just skips appending
-    the ones that come back at 0 — no additional scan.
+    only affects what gets listed.
 
     `mode` tells the frontend which presentation this source uses
     ("doujinshi" -> cover wall + reader, "general" -> unchanged thumbnail
     wall) so it never needs its own copy of the source list — see
     app.config.gallery_modes.resolve_mode, the single source of truth.
+
     Doujinshi-mode item_count uses _count_immediate_subdirs (see its
-    docstring for why) instead of _iter_leaf_items — cheaper AND correct."""
+    docstring for why) — untouched by this ruling, already shallow.
+    GENERAL-mode sources (ruling 2026-09-07, @PM 待回答 #53 item 3) use
+    _has_any_child (non-empty, stops at the first item) then
+    _count_immediate_children (direct-children count) instead of a full
+    _iter_leaf_items() recursive walk — see both functions' docstrings.
+    No caching, no pagination — a deliberate scope limit from the same
+    ruling."""
     if not DOWNLOAD_DIR.exists():
         return []
     cats: list[dict] = []
@@ -154,7 +205,7 @@ def list_categories() -> list[dict]:
         if mode == MODE_DOUJINSHI:
             item_count = _count_immediate_subdirs(entry)
         else:
-            item_count = len(_iter_leaf_items(entry))
+            item_count = _count_immediate_children(entry) if _has_any_child(entry) else 0
         if item_count == 0:
             continue
         cats.append(
