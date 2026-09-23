@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,31 @@ from app.domain.jobs import DownloadResult
 from app.providers.cookies.resolver import resolve_cookie_file
 from app.services.path_service import provider_root, sanitize_component
 
+# facebook.com/fb.watch's own format + the 2026-09-23 cookie-fallback scope
+# below both key off this same domain set — kept as one constant so the two
+# never drift apart.
+_FACEBOOK_DOMAINS = {"facebook.com", "fb.watch"}
+
+# 2026-09-23 root cause (state/runs/nsmh-fb-origin-260923/ytdlp-diagnosis.md):
+# passing `--cookies <facebook cookie file>` makes yt-dlp's facebook extractor
+# fail with "Cannot parse data" on PUBLIC reels/posts that need no login at
+# all — reproduced on two independent yt-dlp versions, and the SAME url with
+# `--cookies` simply omitted succeeds every time. So this is a cookie-file
+# problem, not a stale-extractor problem: `[facebook] ...: Cannot parse
+# data` specifically (both markers required — a `Cannot parse data` from any
+# OTHER extractor, or any OTHER facebook error, is a real failure and is left
+# alone).
+_FACEBOOK_COOKIE_PARSE_ERROR_RE = re.compile(r"\[facebook\].*cannot parse data", re.IGNORECASE)
+
+
+def _is_facebook_cookie_parse_error(error: str | None) -> bool:
+    """Pure matcher: True only for yt-dlp's facebook-extractor 'Cannot parse
+    data' error shape. Does not know about cookies/domains — callers decide
+    whether a cookie-less retry is warranted."""
+    if not error:
+        return False
+    return bool(_FACEBOOK_COOKIE_PARSE_ERROR_RE.search(error))
+
 
 def _normalize_url(raw_url: str) -> str:
     url = raw_url.strip()
@@ -27,7 +53,7 @@ def _normalize_url(raw_url: str) -> str:
 
 
 def _format_for_domain(domain: str) -> str:
-    if domain in {"facebook.com", "fb.watch"}:
+    if domain in _FACEBOOK_DOMAINS:
         return "best"
     return "bestvideo*+bestaudio/best"
 
@@ -82,6 +108,33 @@ def _resolve_executable(name: str) -> str | None:
         return str(local)
 
     return which(name)
+
+
+def _run_yt_dlp(command: list[str]) -> tuple[JobStatus, str]:
+    """Run one yt-dlp subprocess to completion, echoing its output live (same
+    behaviour as before this was extracted) and returning `(status,
+    raw_error)`. `raw_error` is yt-dlp's last non-blank output line — empty
+    string on success (unused by callers). Split out so the 2026-09-23
+    facebook cookie-fallback retry below can invoke this twice with two
+    different commands instead of duplicating the subprocess plumbing."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    output_lines: list[str] = []
+    for line in iter(process.stdout.readline, ""):
+        output_lines.append(line.rstrip())
+        sys.stdout.write(line)
+    process.wait()
+    status = JobStatus.SUCCESS if process.returncode == 0 else JobStatus.FAILED
+    if status == JobStatus.SUCCESS:
+        return status, ""
+    lines = [line.strip() for line in output_lines if line.strip()]
+    return status, (lines[-1] if lines else "yt-dlp failed")
 
 
 def download(url: str) -> DownloadResult:
@@ -148,25 +201,35 @@ def download(url: str) -> DownloadResult:
         command.extend(["--ffmpeg-location", str(Path(ffmpeg).parent)])
     command.append(url)
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    output_lines: list[str] = []
-    for line in iter(process.stdout.readline, ""):
-        output_lines.append(line.rstrip())
-        sys.stdout.write(line)
-    process.wait()
-    status = JobStatus.SUCCESS if process.returncode == 0 else JobStatus.FAILED
+    status, raw_error = _run_yt_dlp(command)
     if status == JobStatus.SUCCESS:
         return DownloadResult(status=status, provider=Provider.YTDLP, domain=domain, download_path=str(root))
 
-    lines = [line.strip() for line in output_lines if line.strip()]
-    raw_error = lines[-1] if lines else "yt-dlp failed"
+    # 2026-09-23 facebook cookie-parse fallback (item 1/2 of the fix spec —
+    # see _FACEBOOK_COOKIE_PARSE_ERROR_RE's docstring above for the root
+    # cause). Only fires when a cookie file was actually sent AND the domain
+    # is in scope AND the error is specifically this shape; must run BEFORE
+    # download_service's stale-extractor auto-update retry, which only ever
+    # sees whatever DownloadResult this function returns — so resolving it
+    # entirely here, before returning, satisfies that ordering for free.
+    cookie_fallback_attempts: list[dict] | None = None
+    if cookie_path and domain in _FACEBOOK_DOMAINS and _is_facebook_cookie_parse_error(raw_error):
+        print("[ytdlp] facebook cookies 導致解析失敗，改用無 cookies 重試")
+        cookie_fallback_attempts = [{"cookies": True, "status": status.value}]
+        retry_command = [part for part in command if part != "--cookies" and part != cookie_path]
+        status, raw_error = _run_yt_dlp(retry_command)
+        cookie_fallback_attempts.append({"cookies": False, "status": status.value})
+        if status == JobStatus.SUCCESS:
+            return DownloadResult(
+                status=status,
+                provider=Provider.YTDLP,
+                domain=domain,
+                download_path=str(root),
+                metadata={"cookie_fallback_attempts": cookie_fallback_attempts},
+            )
+        # cookie-less retry also failed: fall through unchanged below, using
+        # THIS (the retry's) raw_error — same as if no fallback had ever run.
+
     # item 2: classify + record on every failure (no retry loop exists here
     # to cut short — a single yt-dlp invocation is already "one attempt" —
     # but an AUTH classification still arms the cross-engine cooldown
@@ -177,11 +240,14 @@ def download(url: str) -> DownloadResult:
     classification = auth_failure.classify(raw_error)
     if classification == auth_failure.AUTH:
         auth_cooldown.record_auth_failure(domain, raw_error)
+    metadata: dict[str, object] = {"auth_classification": classification}
+    if cookie_fallback_attempts is not None:
+        metadata["cookie_fallback_attempts"] = cookie_fallback_attempts
     return DownloadResult(
         status=status,
         provider=Provider.YTDLP,
         domain=domain,
         download_path=str(root),
         error=sanitize_error(raw_error),
-        metadata={"auth_classification": classification},
+        metadata=metadata,
     )
