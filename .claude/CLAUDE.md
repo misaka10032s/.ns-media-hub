@@ -1,48 +1,24 @@
 # ns-media-hub — AI dev guide
 
-Unified media-download hub (refactored from `ns-gallery-dl`): gallery-dl image-site downloads,
-yt-dlp video, Discord bot auto-download, local API + queue/history/jobs/cookies Web UI,
-Chrome extension, and centralised cookie management. Backend is Python/Flask; frontend is Vue 3/Vite.
+Unified media-download hub (refactored from `ns-gallery-dl`): gallery-dl image-site downloads, yt-dlp video, Discord bot auto-download, local API + queue/history/jobs/cookies Web UI, Chrome extension, and centralised cookie management. Backend is Python/Flask; frontend is Vue 3/Vite.
 
-> Cluster conventions (git authority, language, i18n, ports, layout) are BINDING and live at
-> D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md — Read it before any work here.
-
-## Delegation & verification
-- Orchestration, model tiering, and dispatch rules: D:/backup/CSIA/@PM/.claude/context/model-dispatch-doctrine.md
-- Decision rubrics (escalate / done / ask / change course): D:/backup/CSIA/@PM/.claude/context/judgment-rubrics.md
-- Whoever produced work never certifies it — verification runs in a fresh-context agent.
-- Every done/correct/dead/broken claim carries evidence: file:line, test output, or read-back.
-- Target missing or contradicting the task → STOP and ask; never scaffold around it.
+> Dispatched from @PM: your brief carries a conventions excerpt; follow it, and read a section of the full `D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` only when your topic is outside the excerpt. Working in this repo without an @PM brief: read the sections of that file your task touches.
 
 ## Stack
 - Backend: Python 3.11 + Flask (API + serves frontend build); SQLite at `data/app.db`
 - Frontend: Vue 3 + Vite 8 + Pinia + vue-router; SCSS (sass)
-- Download engines: gallery-dl, yt-dlp — both pip-managed via `venv`, invoked as subprocesses
-  (yt-dlp resolves through PATH/venv `Scripts`, NOT a standalone `.exe`; the old sibling
-  `.ns-yt-dlp` repo fallback is gone — that repo no longer exists)
+- Download engines: gallery-dl, yt-dlp — both pip-managed via `venv`, invoked as subprocesses (yt-dlp resolves through PATH/venv `Scripts`, NOT a standalone `.exe`)
 - Bot: Discord (Python)
-- Chrome extension: `chromeExtension/` (selection export, site-nav, omnibox, redirect cleanup) —
-  before touching the selection engine (`chromeExtension/static/module/selector-*.js`), see
-  `docs/blueprint/entries/BP-EXT-SELECTION-1.md` (approved design, binding decisions; spec linked
-  via its `superpowers:` field at `docs/superpowers/specs/selection-mode-v2-spec.md`)
+- Chrome extension: `chromeExtension/` (selection export, site-nav, omnibox, redirect cleanup) — before touching the selection engine (`chromeExtension/static/module/selector-*.js`), see `docs/blueprint/entries/BP-EXT-SELECTION-1.md` (approved design, binding decisions; spec linked via its `superpowers:` field at `docs/superpowers/specs/selection-mode-v2-spec.md`)
 - External repos absorbed — do NOT modify: `javascript/ns-chrome-tool`
-- **Windows:** use `python` (not `python3`)
+- **Windows:** use `py -3.11` (never bare `python`/`python3`)
 
 ### Downloader package updates (yt-dlp / gallery-dl)
-- Central registry: `app/config/downloaders.py` `DOWNLOADER_PACKAGES` — add a future downloader
-  in ONE line here; `app/services/updater_service.py`, the manual API endpoint, and the launcher
-  `-u`/`-update` flag all derive from it.
-- **Reactive only** — on a download failure classified as a "stale extractor" error (tight,
-  centralized signature list in `updater_service.STALE_EXTRACTOR_SIGNATURES`), the failing
-  provider's package is upgraded via pip and the job retries ONCE. A cooldown + "already
-  installed version" guard (`app/config/downloaders.py` `UPDATE_COOLDOWN_SECONDS`,
-  `app/storage/repositories/downloader_state_repo.py`) prevents mindless update→fail→update loops.
-- **Manual** — `POST /api/downloaders/update` (same-origin guarded, refuses 409 while a job is
-  running) + a "更新下載器" button in the Web UI header.
-- **Launcher `-U`** — `dl.cmd -u` / `dl.sh -u` also force-updates every registered downloader
-  package via the same registry.
-- **NO scheduled / daily / every-startup auto-update** — by design, to keep startup fast and
-  avoid pointless upstream churn.
+- Central registry: `app/config/downloaders.py` `DOWNLOADER_PACKAGES` — add a future downloader in ONE line here; `app/services/updater_service.py`, the manual API endpoint, and the launcher `-u`/`-update` flag all derive from it.
+- **Reactive only** — on a download failure classified as a "stale extractor" error (tight, centralized signature list in `updater_service.STALE_EXTRACTOR_SIGNATURES`), the failing provider's package is upgraded via pip and the job retries ONCE. A cooldown + "already installed version" guard (`app/config/downloaders.py` `UPDATE_COOLDOWN_SECONDS`, `app/storage/repositories/downloader_state_repo.py`) prevents mindless update→fail→update loops.
+- **Manual** — `POST /api/downloaders/update` (same-origin guarded, refuses 409 while a job is running) + a "更新下載器" button in the Web UI header.
+- **Launcher `-U`** — `dl.cmd -u` / `dl.sh -u` also force-updates every registered downloader package via the same registry.
+- **NO scheduled / daily / every-startup auto-update** — by design, to keep startup fast and avoid pointless upstream churn.
 
 ## Run commands
 
@@ -70,11 +46,7 @@ npm run dev     # dev server at 127.0.0.1:5173
 ```bash
 py -3.11 -m pip install -r requirements-dev.txt
 ```
-Use `py -3.11` (the cluster-standard interpreter — NEVER bare `python`/`python3`, see global
-CLAUDE.md). The repo's own `venv/` (Python 3.13) carries only runtime deps (Flask, gallery-dl,
-yt-dlp, discord.py, …) — no pytest/ruff/mypy — and this repo's own CLAUDE.md states "Python
-3.11", so `py -3.11` is both the intended-version match AND where the dev tooling actually
-lives; it's used for every gate command below.
+Use `py -3.11` (the cluster-standard interpreter — NEVER bare `python`/`python3`, see global CLAUDE.md). The repo's own `venv/` (Python 3.13) carries only runtime deps (Flask, gallery-dl, yt-dlp, discord.py, …) — no pytest/ruff/mypy — and this repo's own CLAUDE.md states "Python 3.11", so `py -3.11` is both the intended-version match AND where the dev tooling actually lives; it's used for every gate command below.
 
 ### Python — lint / typecheck / test
 ```bash
@@ -87,141 +59,73 @@ py -3.11 -m pytest -q                             # G3 — 34 test files, 500 te
 ```bash
 cd frontend
 npm run lint    # eslint . (repo-wide, will show the pre-existing 539-warning backlog — G1 itself is diff-scoped, see below)
-npm run test    # vitest run (JobsView.spec.js, HistoryView.spec.js; a zero-test-file result now FAILS the gate — see G3 below)
+npm run test    # vitest run (JobsView.spec.js, HistoryView.spec.js; a zero-test-file result FAILS the gate — see G3 below)
 ```
 
 ## Code quality gates
 
-Two independent gate families — Vue/JS (`frontend/quality-gates/`, npm scripts) and Python
-(`quality-gates/`, `run.py`) — because this repo is a genuine hybrid (Vue 3 + Vite frontend,
-Flask + Discord-bot Python backend). Installed 2026-08-27; every gate below was proven to
-actually fail before shipping (plant a known violation -> non-zero exit -> revert -> green
-again) — a gate that could not be proven able to fail was dropped rather than faked (see
-"Dropped for this repo" below).
+Two independent gate families — Vue/JS (`frontend/quality-gates/`, npm scripts) and Python (`quality-gates/`, `run.py`) — because this repo is a genuine hybrid (Vue 3 + Vite frontend, Flask + Discord-bot Python backend). Every gate below has been proven able to fail; a gate that could not be proven able to fail was dropped rather than faked (see "Dropped for this repo" below).
 
-**Every scan is explicitly scoped** — never a bare `.`/repo-root scan — so a gitignored scratch
-file (this repo has several root-level working dirs: `venv/`, `download/`, `save/`, `data/`,
-plus `frontend/tmp/` reserved for scratch scripts) can never become a gate input:
-- Python: ruff/mypy scan `app module tests` by name (not `.`); pytest is pinned to
-  `testpaths = ["tests"]` in `pyproject.toml` — a stray `test_*.py` dropped in `download/` is
-  invisible to it.
-- Frontend: madge (G4) scans `src/` only, never the package root; vitest's `test.include` is
-  pinned to `src/**/*.{test,spec}.{js,mjs,cjs}` in `vite.config.js` (vitest's own default
-  recursive glob is NOT relied on).
-- The diff-scoped gates (frontend G1/G3b, Python G3b) inherit this for free: `git diff` can
-  never see an untracked/gitignored file in the first place.
+**Every scan is explicitly scoped** — never a bare `.`/repo-root scan — so a gitignored scratch file (this repo has several root-level working dirs: `venv/`, `download/`, `save/`, `data/`, plus `frontend/tmp/` reserved for scratch scripts) can never become a gate input:
+- Python: ruff/mypy scan `app module tests` by name (not `.`); pytest is pinned to `testpaths = ["tests"]` in `pyproject.toml` — a stray `test_*.py` dropped in `download/` is invisible to it.
+- Frontend: madge (G4) scans `src/` only, never the package root; vitest's `test.include` is pinned to `src/**/*.{test,spec}.{js,mjs,cjs}` in `vite.config.js` (vitest's own default recursive glob is NOT relied on).
+- The diff-scoped gates (frontend G1/G3b, Python G3b) inherit this for free: `git diff` can never see an untracked/gitignored file in the first place.
 
-Proof-of-failure evidence for both stacks' scoping:
-`docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"Scan-scoping proof".
+Proof-of-failure evidence for both stacks' scoping: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"Scan-scoping proof".
 
 ### Python — `py -3.11 quality-gates/run.py <g1|g2|g3|g4|g5|l0|l1> [--update-baseline]`
 
-| Gate | What | Scope | Baseline (verified 2026-09-09) |
+| Gate | What | Scope | Baseline |
 |---|---|---|---|
 | G1 | `ruff check app module tests` (select E,F,I,B,UP,RUF) | 47 pre-existing findings baselined (`ruff-baseline.json`), mostly `I001` unsorted-imports / `F401` unused-import — none fixed, only blocked from growing |
 | G2 | `mypy app` (non-strict — see `pyproject.toml` `[tool.mypy]` for why not `strict=true`) | 12 pre-existing errors baselined (`mypy-baseline.json`) across 8 files |
 | G3 | `pytest -q` (green) + AST assertion-presence on changed test functions (`check_test_assertions.py`) | 500 tests, all green |
 | G4 | `import-linter` `layers` contract: `app.api > app.services > app.providers > app.domain > app.storage > app.config` | 4 pre-existing violations baselined (`import-cycle-baseline.json`) — `app.providers.*` genuinely calls `app.services.path_service`/`token_service` for filesystem/auth helpers; this is a real working dependency, not cleaned up, only blocked from growing |
 | G5 | `pytest --cov=app --cov-report=xml` then `diff-cover --fail-under=60` | diff coverage of changed lines only |
-| ~~G6~~ | mutation testing | **REMOVED cluster-wide for Python** — `mutmut` 3.x refuses to start on native Windows at all ("use WSL"), exit 1 unconditionally before mutating anything. Not attempted; recorded, not faked. |
+| ~~G6~~ | mutation testing | none for Python — @PM cluster-conventions G6 |
 
 `l0` = G1+G2+G3+G4 (~8s on the untouched tree). `l1` = l0+G5 (~15s).
 
-**A baseline measured in a worktree goes stale if the merge target moves.** Regenerate it
-against the merge target (`main`) immediately before merging, not at branch-cut time — a
-baseline is a snapshot of a moving tree, not a fixed spec.
+**A baseline measured in a worktree goes stale if the merge target moves.** Regenerate it against the merge target (`main`) immediately before merging, not at branch-cut time — a baseline is a snapshot of a moving tree, not a fixed spec.
 
-**G4 fix (2026-08-27):** `app/api`, `app/config`, `app/domain`, `app/providers`, `app/services`,
-`app/storage` (and 5 `app/providers/*` subpackages) needed empty `__init__.py` added — without
-one, import-linter's analysis engine (grimp) cannot see into a PEP 420 namespace package at
-all, so the contract can silently report "0 violations" while unable to find the code.
-**Do not remove those `__init__.py` files** — `check_import_cycles.py` now fails loud instead of
-silently passing if this regresses. Full discovery narrative:
-`docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G4 vacuous-gate finding".
+**G4 `__init__.py` files:** `app/api`, `app/config`, `app/domain`, `app/providers`, `app/services`, `app/storage` (and 5 `app/providers/*` subpackages) carry empty `__init__.py` files — without one, import-linter's analysis engine (grimp) cannot see into a PEP 420 namespace package at all, so the contract can silently report "0 violations" while unable to find the code. **Do not remove those `__init__.py` files** — `check_import_cycles.py` fails loud if this regresses. History: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G4 vacuous-gate finding".
 
-**G1/G2 config-validation + vanished-baseline fix (2026-08-27 — closed a cluster-wide gap, see
-`D:/backup/CSIA/@PM/state/runs/CROSS-REPO-mypy-failopen.md`):** neither `mypy` nor `ruff`
-crashes on a broken/missing `[tool.mypy]`/`[tool.ruff]` config — both can silently fall back to
-defaults or fail with output the old checker scripts misread as "0 findings". Fixed, same
-two-part shape in both `check_mypy_baseline.py` and `check_ruff_baseline.py`:
-1. **Validate the config before trusting the run.** A static `tomllib` check confirms
-   `pyproject.toml` parses and carries the relevant `[tool.mypy]`/`[tool.ruff]` table BEFORE the
-   tool runs; both checkers pass an explicit `--config-file` (mypy) / `--config` (ruff) instead
-   of relying on auto-discovery. Each script also checks the tool's own signal after running:
-   mypy's config diagnostics are matched in stderr; ruff's config/tool errors are caught via its
-   own return-code contract (0 clean / 1 violations found / 2 tool-or-config error — any other
-   code is a hard FAIL). A config problem detected either way is `[G1]`/`[G2]` **FAIL, exit 2**,
-   naming the exact diagnostic — never a silent PASS.
-2. **A vanished baseline finding is now a FAILURE, not an ignorable note** — `[G1]`/`[G2]`
-   **FAIL, exit 1**, naming every vanished finding. **To legitimately shrink a baseline** (a real
-   fix landed, or a deliberate realignment): confirm *why* the finding vanished first, then run
-   `py -3.11 quality-gates/run.py g1 --update-baseline` (or `g2`) to re-snapshot. Do **not** run
-   `--update-baseline` reflexively just to unblock a FAIL without checking the cause.
-   - **Cost to routine development:** a commit that incidentally fixes one of the pre-existing
-     baselined findings as a side effect (not the commit's main goal) will FAIL until
-     `--update-baseline` is run — this is an intended tradeoff, not a bug.
+**G1/G2 config validation + vanished baseline:** neither `mypy` nor `ruff` crashes on a broken/missing `[tool.mypy]`/`[tool.ruff]` config — both can silently fall back to defaults or fail with output a checker could misread as "0 findings". `check_mypy_baseline.py` and `check_ruff_baseline.py` both guard this in two parts:
+1. **Validate the config before trusting the run.** A static `tomllib` check confirms `pyproject.toml` parses and carries the relevant `[tool.mypy]`/`[tool.ruff]` table BEFORE the tool runs; both checkers pass an explicit `--config-file` (mypy) / `--config` (ruff) instead of relying on auto-discovery. Each script also checks the tool's own signal after running: mypy's config diagnostics are matched in stderr; ruff's config/tool errors are caught via its own return-code contract (0 clean / 1 violations found / 2 tool-or-config error — any other code is a hard FAIL). A config problem detected either way is `[G1]`/`[G2]` **FAIL, exit 2**, naming the exact diagnostic — never a silent PASS.
+2. **A vanished baseline finding is a FAILURE, not an ignorable note** — `[G1]`/`[G2]` **FAIL, exit 1**, naming every vanished finding. **To legitimately shrink a baseline** (a real fix landed, or a deliberate realignment): confirm *why* the finding vanished first, then run `py -3.11 quality-gates/run.py g1 --update-baseline` (or `g2`) to re-snapshot. Do **not** run `--update-baseline` reflexively just to unblock a FAIL without checking the cause.
+   - **Cost to routine development:** a commit that incidentally fixes one of the pre-existing baselined findings as a side effect (not the commit's main goal) will FAIL until `--update-baseline` is run — this is an intended tradeoff, not a bug.
 
-Full reproduction evidence (planted config corruptions, before/after; the measured
-non-reproduction case) and the ruff-baseline realignment history:
-`docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G1/G2 fail-open fix".
+Full reproduction evidence (planted config corruptions, before/after; the measured non-reproduction case) and the ruff-baseline realignment history: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G1/G2 fail-open fix".
 
-**G1/G2/G4 guard-ordering fix (2026-08-27 — closed a SECOND fail-open introduced BY the fix
-above):** the shared `quality-gates/lib/baseline.report_and_decide()` now backs all three gates
-(G1/G2/G4), replacing three near-copies that could drift apart:
-1. `new`/`resolved` are computed ONCE, up front, before EITHER the plain-run branch or the
-   `--update-baseline` branch can act.
+**G1/G2/G4 guard ordering:** the shared `quality-gates/lib/baseline.report_and_decide()` backs all three gates (G1/G2/G4), so they cannot drift apart:
+1. `new`/`resolved` are computed ONCE, up front, before EITHER the plain-run branch or the `--update-baseline` branch can act.
 2. A plain run FAILs (exit 1) if EITHER set is non-empty, and reports **both** — never only one.
-3. `--update-baseline` REFUSES to write (exit 1, zero file change) **only when BOTH `new` and
-   `resolved` are non-empty** — the one state where a plain re-snapshot is genuinely ambiguous. A
-   **new-only** run (deliberately accepting a finding as debt) or a **resolved-only** run
-   (shrinking for a genuine fix) still PROCEEDS, naming every finding it accepts or removes.
+3. `--update-baseline` REFUSES to write (exit 1, zero file change) **only when BOTH `new` and `resolved` are non-empty** — the one state where a plain re-snapshot is genuinely ambiguous. A **new-only** run (deliberately accepting a finding as debt) or a **resolved-only** run (shrinking for a genuine fix) still PROCEEDS, naming every finding it accepts or removes.
 
-All four run-states proven for G1, G2, and G4 (new-only / vanished-only / both-at-once /
-neither), exit codes confirmed for each, PLUS `--update-baseline`'s behavior verified separately
-in every state. See the "ORDERING FIX" docstring block at the top of each of the three checker
-scripts, and `report_and_decide()`'s own docstring in `quality-gates/lib/baseline.py`. Defect
-description + reproduction evidence:
-`docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G1/G2/G4 guard-ordering fix".
+See the "ORDERING FIX" docstring block at the top of each of the three checker scripts, and `report_and_decide()`'s own docstring in `quality-gates/lib/baseline.py`. Defect description + reproduction evidence: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G1/G2/G4 guard-ordering fix".
 
 ### Frontend — `cd frontend && npm run gate:<g1|g3|g4|l0|l1>`
 
-| Gate | What | Scope | Baseline (verified 2026-09-09) |
+| Gate | What | Scope | Baseline |
 |---|---|---|---|
 | G1 | ESLint, diff-LINE-scoped (only messages on lines the diff actually touched) | 539 pre-existing warnings repo-wide (all `eslint-plugin-vue` stylistic rules — `max-attributes-per-line`, `singleline-html-element-content-newline`, `html-self-closing`; 0 errors) made a bare `--max-warnings=0` unusable, so this gate uses the same line-diff scoping misaka_site2.0 uses for the same reason, at a smaller scale |
-| G3 | `vitest run` (green, `passWithNoTests: false`) + `@vitest/eslint-plugin` `expect-expect` on changed test files | `src/views/JobsView.spec.js` + `src/views/HistoryView.spec.js` (8 tests total, real assertions) — a zero-matched-test-file result now hard-FAILs (fixed 2026-09-01, see below); grows as more tests are added |
+| G3 | `vitest run` (green, `passWithNoTests: false`) + `@vitest/eslint-plugin` `expect-expect` on changed test files | `src/views/JobsView.spec.js` + `src/views/HistoryView.spec.js` (8 tests total, real assertions) — a zero-matched-test-file result now hard-FAILs (see below); grows as more tests are added |
 | G4 | `madge` circular-import check on `src/` | 0 pre-existing cycles |
 | `l1` | = `l0` (no G5/G6 — see below) | |
 
-**G3 vacuous-gate finding (fixed 2026-09-01):** `frontend/vite.config.js`'s `test` block used to
-set `passWithNoTests: true`, which made a matched-zero-test-files result PASS indistinguishably
-from a genuinely green suite. Fixed by writing the first real frontend test and removing that
-override (left at vitest's own default, `false`), so an "all tests deleted" state now hard-fails
-instead of passing. **Do not re-add `passWithNoTests: true`** without also adding a gate that
-separately checks "at least one test file exists". Full narrative:
-`docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G3 vacuous-gate finding (frontend)".
+**G3 `passWithNoTests`:** `frontend/vite.config.js`'s `test` block leaves `passWithNoTests` at vitest's own default (`false`), so an "all tests deleted" state hard-fails instead of passing indistinguishably from a genuinely green suite. **Do not re-add `passWithNoTests: true`** without also adding a gate that separately checks "at least one test file exists". Full narrative: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G3 vacuous-gate finding (frontend)".
 
 **Dropped for this repo, with evidence (not faked):**
-- **G2 (typecheck)** — this frontend has **zero TypeScript**: 0 `.ts`/`.tsx` files, no
-  `tsconfig.json` (verified 2026-09-09; 27 source files are `.vue`/`.js`). Revisit if/when the
-  frontend adopts TS.
-- **G5 (diff coverage) / G6 (mutation)** — this frontend has two test files today (vs the Python
-  side's 34 files / 500 tests). A coverage or mutation-kill threshold against so little tested
-  surface is still theatre, not signal — skip until real coverage exists across more components,
-  then reconsider both.
+- **G2 (typecheck)** — this frontend has **zero TypeScript**: 0 `.ts`/`.tsx` files, no `tsconfig.json` (27 source files are `.vue`/`.js`). Revisit if/when the frontend adopts TS.
+- **G5 (diff coverage) / G6 (mutation)** — this frontend has two test files today (vs the Python side's 34 files / 500 tests). A coverage or mutation-kill threshold against so little tested surface is still theatre, not signal — skip until real coverage exists across more components, then reconsider both.
 
-Rationale for both drops (vacuous-checker precedent, minimal-diff scoping):
-`docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"Dropped gates rationale".
+Rationale for both drops (vacuous-checker precedent, minimal-diff scoping): `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"Dropped gates rationale".
 
 ### Enabling the pre-commit hook
 ```bash
 git config core.hooksPath .githooks
 ```
-`.githooks/pre-commit` derives which stack(s) a commit touches from the staged file list and
-runs only that stack's `l0` (frontend `frontend/*` staged -> `npm run gate:l0`; Python
-`{app,module,scripts,tests}/*.py` staged -> `py -3.11 quality-gates/run.py l0`) — a
-docs-only or config-only commit runs neither and exits immediately. `core.hooksPath` is
-per-clone local config; it does not travel with the repo, so run the command above again on
-any fresh clone or machine.
+`.githooks/pre-commit` derives which stack(s) a commit touches from the staged file list and runs only that stack's `l0` (frontend `frontend/*` staged -> `npm run gate:l0`; Python `{app,module,scripts,tests}/*.py` staged -> `py -3.11 quality-gates/run.py l0`) — a docs-only or config-only commit runs neither and exits immediately. `core.hooksPath` is per-clone LOCAL config (it lives in `.git/config`, never in a tracked file), so it is NOT self-installing: every fresh clone or new machine runs without the guard until the command above is run again. Known gaps: a detached HEAD and `git commit --no-verify` skip the hook; it is not a complete gate.
 
 ## Project structure
 ```
@@ -258,8 +162,7 @@ dl.py               Python entry point → app.main
 - Legacy `data/history.json` auto-migrates to SQLite on init
 
 ### `.env` (copy from `.env.example`)
-Key fields: `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_IDS`, `BOT_DOMAIN_ALLOWLIST`,
-`BOT_DOMAIN_DENYLIST`, `DISCORD_EMOJI_*`
+Key fields: `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_IDS`, `BOT_DOMAIN_ALLOWLIST`, `BOT_DOMAIN_DENYLIST`, `DISCORD_EMOJI_*`
 
 ### Site-specific logic
 - Preserve nhentai + wnacg specialized download logic — do not generalise away
@@ -269,10 +172,7 @@ Key fields: `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_IDS`, `BOT_DOMAIN_ALLOWLIST`,
 - **Data / schema:** verify data and schema by querying `data/app.db` directly — never infer schema from code.
 
 ## graphify
-Before answering architecture/code questions: check `graphify-out/GRAPH_REPORT.md` for core
-nodes; if `graphify-out/wiki/index.md` exists, browse the wiki before reading source files.
-After code changes in this session, keep the graph in sync:
-`python -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"`
+Before answering architecture/code questions: check `graphify-out/GRAPH_REPORT.md` for core nodes; if `graphify-out/wiki/index.md` exists, browse the wiki before reading source files. Graph refresh and rebuild: follow `D:/backup/CSIA/@PM/.claude/context/graphify-maintenance.md` (the rule lives only there); the interpreter is the one recorded in `graphify-out/.graphify_python`.
 
 ## Skills (must use)
 - **`superpowers:brainstorming`** — required before any new feature, improvement, or architecture change
