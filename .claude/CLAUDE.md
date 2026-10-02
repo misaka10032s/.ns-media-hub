@@ -64,7 +64,7 @@ npm run test    # vitest run (JobsView.spec.js, HistoryView.spec.js; a zero-test
 
 ## Code quality gates
 
-Two independent gate families — Vue/JS (`frontend/quality-gates/`, npm scripts) and Python (`quality-gates/`, `run.py`) — because this repo is a genuine hybrid (Vue 3 + Vite frontend, Flask + Discord-bot Python backend). Every gate below has been proven able to fail; a gate that could not be proven able to fail was dropped rather than faked (see "Dropped for this repo" below).
+Two independent gate families — Vue/JS (`frontend/quality-gates/`, npm scripts) and Python (`quality-gates/`, `run.py`) — because this repo is a genuine hybrid (Vue 3 + Vite frontend, Flask + Discord-bot Python backend). Every gate below is proven able to fail; a gate that cannot be proven able to fail is dropped rather than faked (see "Dropped for this repo" below).
 
 **Every scan is explicitly scoped** — never a bare `.`/repo-root scan — so a gitignored scratch file (this repo has several root-level working dirs: `venv/`, `download/`, `save/`, `data/`, plus `frontend/tmp/` reserved for scratch scripts) can never become a gate input:
 - Python: ruff/mypy scan `app module tests` by name (not `.`); pytest is pinned to `testpaths = ["tests"]` in `pyproject.toml` — a stray `test_*.py` dropped in `download/` is invisible to it.
@@ -109,7 +109,7 @@ See the "ORDERING FIX" docstring block at the top of each of the three checker s
 | Gate | What | Scope | Baseline |
 |---|---|---|---|
 | G1 | ESLint, diff-LINE-scoped (only messages on lines the diff actually touched) | 539 pre-existing warnings repo-wide (all `eslint-plugin-vue` stylistic rules — `max-attributes-per-line`, `singleline-html-element-content-newline`, `html-self-closing`; 0 errors) made a bare `--max-warnings=0` unusable, so this gate uses the same line-diff scoping misaka_site2.0 uses for the same reason, at a smaller scale |
-| G3 | `vitest run` (green, `passWithNoTests: false`) + `@vitest/eslint-plugin` `expect-expect` on changed test files | `src/views/JobsView.spec.js` + `src/views/HistoryView.spec.js` (8 tests total, real assertions) — a zero-matched-test-file result now hard-FAILs (see below); grows as more tests are added |
+| G3 | `vitest run` (green, `passWithNoTests: false`) + `@vitest/eslint-plugin` `expect-expect` on changed test files | `src/views/JobsView.spec.js` + `src/views/HistoryView.spec.js` (8 tests total, real assertions) — a zero-matched-test-file result hard-FAILs (see below); grows as more tests are added |
 | G4 | `madge` circular-import check on `src/` | 0 pre-existing cycles |
 | `l1` | = `l0` (no G5/G6 — see below) | |
 
