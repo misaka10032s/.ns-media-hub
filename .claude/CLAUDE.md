@@ -1,6 +1,6 @@
 # ns-media-hub — AI dev guide
 
-Unified media-download hub (refactored from `ns-gallery-dl`): gallery-dl image-site downloads, yt-dlp video, Discord bot auto-download, local API + queue/history/jobs/cookies Web UI, Chrome extension, and centralised cookie management. Backend is Python/Flask; frontend is Vue 3/Vite.
+Unified media-download hub (based on `ns-gallery-dl`): gallery-dl image-site downloads, yt-dlp video, Discord bot auto-download, local API + queue/history/jobs/cookies Web UI, Chrome extension, and centralised cookie management. Backend is Python/Flask; frontend is Vue 3/Vite.
 
 > Dispatched from @PM: your brief carries a conventions excerpt; follow it, and read a section of the full `D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` only when your topic is outside the excerpt. Working in this repo without an @PM brief: read the sections of that file your task touches.
 
