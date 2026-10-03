@@ -13,7 +13,7 @@ Backend is Python/Flask; frontend is Vue 3/Vite.
 - Bot: Discord (Python)
 - Chrome extension: `chromeExtension/` (selection export, site-nav, omnibox, redirect cleanup) — before touching the selection engine (`chromeExtension/static/module/selector-*.js`), see `docs/blueprint/entries/BP-EXT-SELECTION-1.md` (approved design, binding decisions; spec linked via its `superpowers:` field at `docs/superpowers/specs/selection-mode-v2-spec.md`)
 - External repos absorbed — do NOT modify: `javascript/ns-chrome-tool`
-- **Windows:** global CLAUDE.md `## Python launch (this Windows machine — read before any python command)`
+- **Windows:** the global CLAUDE.md Python line
 
 ### Downloader package updates (yt-dlp / gallery-dl)
 - Central registry: `app/config/downloaders.py` `DOWNLOADER_PACKAGES` — add a future downloader in ONE line here; `app/services/updater_service.py`, the manual API endpoint, and the launcher `-u`/`-update` flag all derive from it.
@@ -49,7 +49,7 @@ npm run dev     # dev server at 127.0.0.1:5173
 ```bash
 py -3.11 -m pip install -r requirements-dev.txt
 ```
-Use `py -3.11` (global CLAUDE.md `## Python launch (this Windows machine — read before any python command)`).
+Use `py -3.11` (the global CLAUDE.md Python line).
 
 The repo's own `venv/` (Python 3.13) carries only runtime deps (Flask, gallery-dl, yt-dlp, discord.py, …) — no pytest/ruff/mypy — and this repo's own CLAUDE.md states "Python 3.11", so `py -3.11` is both the intended-version match AND where the dev tooling actually lives; it's used for every gate command below.
 
