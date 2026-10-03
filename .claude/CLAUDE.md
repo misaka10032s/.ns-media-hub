@@ -11,7 +11,7 @@ Unified media-download hub (based on `ns-gallery-dl`): gallery-dl image-site dow
 - Bot: Discord (Python)
 - Chrome extension: `chromeExtension/` (selection export, site-nav, omnibox, redirect cleanup) — before touching the selection engine (`chromeExtension/static/module/selector-*.js`), see `docs/blueprint/entries/BP-EXT-SELECTION-1.md` (approved design, binding decisions; spec linked via its `superpowers:` field at `docs/superpowers/specs/selection-mode-v2-spec.md`)
 - External repos absorbed — do NOT modify: `javascript/ns-chrome-tool`
-- **Windows:** the global CLAUDE.md Python line
+- **Windows:** the quality gates use `py -3.11` as this repo's exception to the global Python order; the reason is in the line that starts "Use `py -3.11`" under "Python — install dev/gate tooling" in the Dev commands section
 
 ### Downloader package updates (yt-dlp / gallery-dl)
 - Central registry: `app/config/downloaders.py` `DOWNLOADER_PACKAGES` — add a future downloader in ONE line here; `app/services/updater_service.py`, the manual API endpoint, and the launcher `-u`/`-update` flag all derive from it.
