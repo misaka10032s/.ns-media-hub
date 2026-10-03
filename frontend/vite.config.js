@@ -16,6 +16,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    setupFiles: ['./src/test-utils/noRepoWrites.ts'],
     // EXPLICIT scope — do NOT fall back to vitest's default recursive glob. That default would
     // also pick up any gitignored scratch test dropped under frontend/tmp/ (see .gitignore) and
     // fail the gate on a file nobody meant to ship — the exact defect this line exists to close

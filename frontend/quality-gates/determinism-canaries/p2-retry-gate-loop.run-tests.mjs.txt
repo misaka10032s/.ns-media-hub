@@ -1,0 +1,5 @@
+import { spawn } from 'node:child_process'
+
+for (let attempt = 0; attempt < 2; attempt += 1) {
+  spawn('npx', ['vitest', 'run'])
+}

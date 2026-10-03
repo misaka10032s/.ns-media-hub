@@ -1,0 +1,10 @@
+import { afterEach, expect, it, vi } from 'vitest'
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+it('c', () => {
+  vi.useFakeTimers()
+  expect(Date.now()).toBeGreaterThan(0)
+})

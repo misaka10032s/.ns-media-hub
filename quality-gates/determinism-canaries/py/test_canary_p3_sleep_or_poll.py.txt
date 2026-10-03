@@ -1,0 +1,6 @@
+import time
+
+
+def test_c():
+    time.sleep(0.01)
+    assert True

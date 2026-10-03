@@ -1,0 +1,7 @@
+import { expect, it } from 'vitest'
+
+const n = Math.random()
+
+it('c', () => {
+  expect(n).toBeLessThan(2)
+})

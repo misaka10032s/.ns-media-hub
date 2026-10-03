@@ -3,13 +3,25 @@
 """
 from __future__ import annotations
 
+import builtins
+import os
 import shutil
+import sqlite3
+import tempfile
 import pytest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from app.config import paths as _paths_module
+
+# G3(c) pattern P9 runtime guard (see `_no_repo_writes` below): the repo root and the system
+# temp folder, resolved once at import time, before any fixture patches anything.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
+_RUNNER_OUTPUT_DIRS = {".pytest_cache", "__pycache__", "htmlcov"}
+_RUNNER_OUTPUT_FILES = {"coverage.xml"}
 
 # Captured ONCE at collection time, before any fixture ever patches anything —
 # the repo's REAL, live production paths. assert_db_paths_isolated() /
@@ -57,6 +69,114 @@ def _path_under_guarded_root(path) -> Path | None:
         if resolved == root or root in resolved.parents:
             return root
     return None
+
+
+def _inside(parent: Path, child: Path) -> bool:
+    parent_key = os.path.normcase(str(parent))
+    child_key = os.path.normcase(str(child))
+    return child_key == parent_key or child_key.startswith(parent_key + os.sep)
+
+
+def _repo_write_target(value) -> Path | None:
+    """The resolved path `value` points at when a write to it is NOT allowed: inside the repo
+    root, outside the system temp folder, and not a test-runner output. None otherwise (also for
+    a file descriptor, ':memory:' or anything that is not a path)."""
+    if isinstance(value, bytes):
+        value = os.fsdecode(value)
+    if not isinstance(value, str | os.PathLike):
+        return None
+    text = os.fspath(value)
+    if isinstance(text, bytes):
+        text = os.fsdecode(text)
+    if text in ("", ":memory:") or text.startswith("file::memory:"):
+        return None
+    if text.startswith("file:"):
+        # SQLite URI (`sqlite3.connect(..., uri=True)`): the file is the path part, and a
+        # read-only open (`mode=ro` / `immutable=1`) is not a write.
+        rest, _, query = text[len("file:"):].partition("?")
+        flags = {part.strip().lower() for part in query.split("&")}
+        if "mode=ro" in flags or "immutable=1" in flags:
+            return None
+        if rest.startswith("//"):
+            rest = rest[2:].partition("/")[2]
+            rest = rest if (len(rest) > 1 and rest[1] == ":") else "/" + rest
+        elif len(rest) > 2 and rest[0] == "/" and rest[2] == ":":
+            rest = rest[1:]
+        text = unquote(rest)
+    try:
+        resolved = Path(text).resolve()
+    except (OSError, ValueError):
+        return None
+    if _inside(_TEMP_ROOT, resolved) or not _inside(_REPO_ROOT, resolved):
+        return None
+    relative_parts = resolved.relative_to(_REPO_ROOT).parts if _inside(_REPO_ROOT, resolved) else ()
+    if any(part in _RUNNER_OUTPUT_DIRS for part in relative_parts):
+        return None
+    if resolved.name in _RUNNER_OUTPUT_FILES or resolved.name.startswith(".coverage"):
+        return None
+    return resolved
+
+
+def _open_writes(mode) -> bool:
+    return isinstance(mode, str) and any(flag in mode for flag in "wax+")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_repo_writes():
+    """G3(c) pattern P9, runtime half: a static check cannot see a file written by product code a
+    test calls, so every function that creates, changes, moves or removes a file or opens a
+    SQLite file is wrapped for the whole session. A target inside the repo root and outside the
+    system temp folder raises instead of writing. Allowed: `.pytest_cache`, `__pycache__`,
+    `.coverage*`, `coverage.xml`, `htmlcov/`. This sits under (and does not replace) the
+    per-test redirection and guards of `_isolate_every_test_from_the_real_database`."""
+
+    def guarded(original, name: str, indexes: tuple[int, ...], keyword: str | None = None):
+        def wrapper(*args, **kwargs):
+            for index in indexes:
+                value = args[index] if index < len(args) else (kwargs.get(keyword) if keyword and index == indexes[0] else None)
+                target = _repo_write_target(value)
+                if target is not None:
+                    raise RuntimeError(
+                        f"no-repo-writes guard: {name}() would write {target}, which is inside the "
+                        "repo and outside the system temp folder. Route the write through tmp_path."
+                    )
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    def guarded_open(original, name: str, mode_index: int):
+        def wrapper(*args, **kwargs):
+            mode = args[mode_index] if len(args) > mode_index else kwargs.get("mode", "r")
+            if _open_writes(mode):
+                target = _repo_write_target(args[0] if args else kwargs.get("file"))
+                if target is not None:
+                    raise RuntimeError(
+                        f"no-repo-writes guard: {name}() would write {target}, which is inside the "
+                        "repo and outside the system temp folder. Route the write through tmp_path."
+                    )
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    with pytest.MonkeyPatch.context() as session_patch:
+        session_patch.setattr(builtins, "open", guarded_open(builtins.open, "open", 1))
+        session_patch.setattr(Path, "open", guarded_open(Path.open, "Path.open", 1))
+        for name in ("write_text", "write_bytes", "mkdir", "touch", "unlink", "rmdir"):
+            session_patch.setattr(Path, name, guarded(getattr(Path, name), f"Path.{name}", (0,)))
+        for name in ("rename", "replace"):
+            session_patch.setattr(Path, name, guarded(getattr(Path, name), f"Path.{name}", (0, 1)))
+        for name in ("remove", "unlink", "rmdir", "mkdir", "makedirs", "truncate"):
+            session_patch.setattr(os, name, guarded(getattr(os, name), f"os.{name}", (0,), "path"))
+        for name in ("rename", "replace"):
+            session_patch.setattr(os, name, guarded(getattr(os, name), f"os.{name}", (0, 1)))
+        for name in ("symlink", "link"):
+            session_patch.setattr(os, name, guarded(getattr(os, name), f"os.{name}", (1,)))
+        session_patch.setattr(shutil, "rmtree", guarded(shutil.rmtree, "shutil.rmtree", (0,)))
+        for name in ("copy", "copy2", "copyfile", "copytree"):
+            session_patch.setattr(shutil, name, guarded(getattr(shutil, name), f"shutil.{name}", (1,)))
+        session_patch.setattr(shutil, "move", guarded(shutil.move, "shutil.move", (0, 1)))
+        session_patch.setattr(sqlite3, "connect", guarded(sqlite3.connect, "sqlite3.connect", (0,), "database"))
+        yield
 
 
 def assert_db_paths_isolated(db_module) -> None:
@@ -326,6 +446,21 @@ def _isolate_every_test_from_the_real_database(tmp_path: Path, monkeypatch):
 
         yield
         db_module._READY = False
+
+
+@pytest.fixture(autouse=True)
+def _no_real_wait_in_doujin_meta_service(monkeypatch):
+    """doujin_meta_service._throttle sleeps up to MIN_INTERVAL_SECONDS and a
+    retry sleeps BACKOFF_SECONDS, against the module-global _last_request_at.
+    A test that forgets to patch them would wait real seconds and share that
+    dict with the next test — so every test gets a recording sleep (never
+    waits) and a fresh _last_request_at. Per-test patches still override."""
+    from app.services import doujin_meta_service
+
+    recorded_sleeps: list[float] = []
+    monkeypatch.setattr(doujin_meta_service.time, "sleep", recorded_sleeps.append)
+    monkeypatch.setattr(doujin_meta_service, "_last_request_at", {})
+    yield recorded_sleeps
 
 
 @pytest.fixture

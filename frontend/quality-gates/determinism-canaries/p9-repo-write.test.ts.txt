@@ -1,0 +1,8 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { expect, it } from 'vitest'
+
+it('c', () => {
+  fs.writeFileSync(path.join(__dirname, 'c.txt'), 'c')
+  expect(1).toBe(1)
+})

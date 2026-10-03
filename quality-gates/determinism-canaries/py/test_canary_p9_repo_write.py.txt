@@ -1,0 +1,6 @@
+from pathlib import Path
+
+
+def test_c():
+    Path(__file__).with_name("c.txt").write_text("c")
+    assert True

@@ -1,0 +1,19 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { expect, it } from 'vitest'
+import { writeCanaryFile } from './p9-runtime-scratch-helper'
+
+// Copy p9-runtime-scratch-helper.ts.txt next to this file as p9-runtime-scratch-helper.ts.
+// Expected with the runtime guard on: the first test fails with the guard's error and c.txt is
+// not created; the second passes.
+it('c: writes into the repo', () => {
+  writeCanaryFile(process.cwd())
+  expect(fs.existsSync(path.resolve(process.cwd(), 'c.txt'))).toBe(false)
+})
+
+it('c: writes under the temp folder', () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'canary-'))
+  writeCanaryFile(folder)
+  expect(fs.existsSync(path.join(folder, 'c.txt'))).toBe(true)
+})

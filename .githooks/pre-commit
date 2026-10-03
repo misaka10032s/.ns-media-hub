@@ -15,7 +15,7 @@ staged=$(git diff --cached --name-only --diff-filter=ACMR)
 
 ran_any=0
 
-if printf '%s\n' "$staged" | grep -q '^frontend/'; then
+if printf '%s\n' "$staged" | grep -qE '^(frontend/|\.githooks/pre-commit$)'; then
   ran_any=1
   echo "[pre-commit] frontend/ changes staged — running gate:l0 (G1 lint-diff, G3 tests+assertions, G4 import cycles)..."
   (cd "$repo_root/frontend" && npm run gate:l0)
@@ -27,7 +27,7 @@ if printf '%s\n' "$staged" | grep -q '^frontend/'; then
   echo "[pre-commit] frontend gate:l0 PASSED."
 fi
 
-if printf '%s\n' "$staged" | grep -qE '^(app|module|scripts|tests)/.*\.py$'; then
+if printf '%s\n' "$staged" | grep -qE '^(app|module|scripts|tests)/.*\.py$|^quality-gates/|^(pyproject\.toml|pytest\.ini|\.githooks/pre-commit)$|(^|/)conftest\.py$'; then
   ran_any=1
   echo "[pre-commit] Python changes staged — running quality-gates/run.py l0 (G1 ruff, G2 mypy, G3 pytest+assertions, G4 import-linter)..."
   py -3.11 quality-gates/run.py l0

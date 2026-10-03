@@ -61,7 +61,10 @@ def g3() -> int:
     rc = _run([sys.executable, "-m", "pytest", "-q"])
     if rc != 0:
         return rc
-    return _run([sys.executable, str(GATES_DIR / "check_test_assertions.py")])
+    rc = _run([sys.executable, str(GATES_DIR / "check_test_assertions.py")])
+    if rc != 0:
+        return rc
+    return _run([sys.executable, str(GATES_DIR / "check_test_determinism.py")])
 
 
 def g4(update_baseline: bool = False) -> int:

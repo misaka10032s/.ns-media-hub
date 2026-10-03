@@ -18,6 +18,17 @@ import pytest
 
 from app.services import updater_service
 
+FIXED_NOW = datetime(2026, 1, 15, 12, 0, 0)
+
+
+class _Frozen(datetime):
+    """Stands in for updater_service's module-global `datetime`: now() is
+    always FIXED_NOW, everything else (fromisoformat) is the real behaviour."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return FIXED_NOW
+
 
 class TestIsStaleExtractorError:
     @pytest.mark.parametrize(
@@ -199,8 +210,9 @@ class TestMaybeReactiveUpdate:
         assert outcome == {"retried": False, "changed": False, "message": ""}
 
     def test_within_cooldown_and_already_latest_skips_update_entirely(self):
-        recent = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+        recent = (FIXED_NOW - timedelta(minutes=5)).isoformat(timespec="seconds")
         with (
+            patch("app.services.updater_service.datetime", _Frozen),
             patch("app.services.updater_service.init_db"),
             patch(
                 "app.services.updater_service.downloader_state_repo.get_state",
@@ -218,8 +230,9 @@ class TestMaybeReactiveUpdate:
         assert "2024.06.01" in outcome["message"]
 
     def test_outside_cooldown_runs_update_and_signals_retry_on_change(self):
-        stale = (datetime.now() - timedelta(hours=12)).isoformat(timespec="seconds")
+        stale = (FIXED_NOW - timedelta(hours=12)).isoformat(timespec="seconds")
         with (
+            patch("app.services.updater_service.datetime", _Frozen),
             patch("app.services.updater_service.init_db"),
             patch(
                 "app.services.updater_service.downloader_state_repo.get_state",
@@ -277,8 +290,9 @@ class TestMaybeReactiveUpdate:
     def test_pip_timeout_after_prior_confirmed_state_still_skips_persisting(self):
         """Even when prior state exists (cooldown was already expired, triggering
         this check), a timeout on THIS check must not overwrite/refresh it."""
-        stale = (datetime.now() - timedelta(hours=12)).isoformat(timespec="seconds")
+        stale = (FIXED_NOW - timedelta(hours=12)).isoformat(timespec="seconds")
         with (
+            patch("app.services.updater_service.datetime", _Frozen),
             patch("app.services.updater_service.init_db"),
             patch(
                 "app.services.updater_service.downloader_state_repo.get_state",

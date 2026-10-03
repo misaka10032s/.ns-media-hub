@@ -1,0 +1,8 @@
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
+
+// A scratch "product" helper: the target folder arrives through a parameter, so no static rule can
+// see where it writes. Only the runtime guard (src/test-utils/noRepoWrites.ts) can.
+export function writeCanaryFile(folder: string): void {
+  writeFileSync(path.resolve(folder, 'c.txt'), 'c')
+}

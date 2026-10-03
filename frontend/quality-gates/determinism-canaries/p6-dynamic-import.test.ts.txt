@@ -1,0 +1,6 @@
+import { expect, it } from 'vitest'
+
+it('c', async () => {
+  const m = await import('./someModule')
+  expect(m).toBeTruthy()
+})

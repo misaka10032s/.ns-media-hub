@@ -1,0 +1,59 @@
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient } from '@tanstack/vue-query'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { routes } from '@/router/routes'
+import { stubRouteComponents } from '@/router/stubRouteComponents.testUtils'
+
+// Every construct below is an exemption the checker names; the checker must report 0 hits here.
+
+vi.mock('./heavy', async () => {
+  const vue = await import('vue')
+  return { vue }
+})
+
+describe('frozen clock', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-15T12:00:00Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  it('reads the frozen clock', () => {
+    expect(Date.now()).toBe(Date.parse('2026-01-15T12:00:00Z'))
+  })
+})
+
+it('random is spied', () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0.5)
+  expect(Math.random()).toBe(0.5)
+})
+
+it('a node builtin may be imported inside a test', async () => {
+  const fsModule = await import('node:fs')
+  expect(typeof fsModule.existsSync).toBe('function')
+})
+
+it('the stub helper from the shared module', () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: stubRouteComponents(routes) })
+  expect(router).toBeTruthy()
+})
+
+it('a write under the temp folder', () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'c-'))
+  fs.writeFileSync(path.join(folder, 'a'), 'a')
+  expect(fs.existsSync(path.join(folder, 'a'))).toBe(true)
+})
+
+it('a retry key that is not a test option', () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  expect(client).toBeTruthy()
+})
+
+it('one zero-delay yield', async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(1).toBe(1)
+})
