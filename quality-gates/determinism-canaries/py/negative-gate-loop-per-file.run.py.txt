@@ -1,0 +1,7 @@
+import subprocess
+import sys
+
+files = ["a_test.py", "b_test.py"]
+for path in files:
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", path])
+    print(path, result.returncode)

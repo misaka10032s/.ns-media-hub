@@ -1,0 +1,15 @@
+import os
+import shutil
+
+# Runtime-guard negative canary: the guard must let every line of this pass (temp folder writes, repo reads).
+
+
+def test_c(tmp_path):
+    target = tmp_path / "c.txt"
+    with open(target, "w") as handle:
+        handle.write("c")
+    shutil.copyfile(target, tmp_path / "d.txt")
+    os.rename(tmp_path / "d.txt", tmp_path / "e.txt")
+    os.remove(tmp_path / "e.txt")
+    with open(os.path.abspath(__file__)) as handle:
+        assert handle.read()

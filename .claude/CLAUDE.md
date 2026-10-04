@@ -93,6 +93,8 @@ Proof-of-failure evidence for both stacks' scoping: `docs/superpowers/decisions/
 
 `l0` and `l1` run the gates `D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` `### Levels` assigns to L0 and L1 (~8s and ~15s on the untouched tree).
 
+Commit = staged-file lint + determinism + related tests, within 10 seconds (`py -3.11 quality-gates/run.py commit`: ruff on the staged files, the determinism scan, the assertion check on staged test files, pytest on the related test files from `quality-gates/related_tests.py`); end of the task (before merge) = the task's one full run: `py -3.11 quality-gates/run.py l1`.
+
 **A baseline measured in a worktree goes stale if the merge target moves.**
 
 Regenerate it against the merge target (`main`) immediately before merging, not at branch-cut time — a baseline is a snapshot of a moving tree, not a fixed spec.
@@ -127,7 +129,9 @@ See the "ORDERING FIX" docstring block at the top of each of the three checker s
 
 Defect description + reproduction evidence: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` §"G1/G2/G4 guard-ordering fix".
 
-### Frontend — `cd frontend && npm run gate:<g1|g3|g4|l0|l1>`
+### Frontend — `cd frontend && npm run gate:<g1|g3|g4|commit|l0|l1>`
+
+Commit = staged-file lint + determinism + related tests, within 10 seconds (`npm run gate:commit`: ESLint on the staged files' changed lines, the determinism scan, the assertion check on staged test files, `vitest related` on the staged files through `quality-gates/run-related-tests.mjs`, which passes no pool or worker flag); end of the task (before merge) = the task's one full run: `npm run gate:l1`.
 
 | Gate | What | Scope | Baseline |
 |---|---|---|---|
@@ -154,7 +158,7 @@ Rationale for both drops (vacuous-checker precedent, minimal-diff scoping): `doc
 ```bash
 git config core.hooksPath .githooks
 ```
-`.githooks/pre-commit` derives which stack(s) a commit touches from the staged file list and runs only that stack's `l0` (frontend `frontend/*` staged -> `npm run gate:l0`; Python `{app,module,scripts,tests}/*.py` staged -> `py -3.11 quality-gates/run.py l0`) — a docs-only or config-only commit runs neither and exits immediately.
+`.githooks/pre-commit` derives which stack(s) a commit touches from the staged file list and runs only that stack's commit level (frontend `frontend/*` staged -> `npm run gate:commit`; Python `{app,module,scripts,tests}/*.py` staged -> `py -3.11 quality-gates/run.py commit`), and both also run when any `requirements*.txt`, any file under a `quality-gates/` folder, any determinism canary or the hook itself is staged; the whole-project `l0`/`l1` run once at the end of the task — a docs-only or config-only commit runs neither and exits immediately.
 
 Run the command above once per clone; it is not self-installing, and a detached HEAD or `git commit --no-verify` skips it (`D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` `### Hook carrier (L0 enforcement)`).
 

@@ -1,0 +1,6 @@
+import random
+
+
+def test_c():
+    random.seed(None)
+    assert True

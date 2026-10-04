@@ -1,46 +1,69 @@
 #!/bin/sh
-# L0 quality gate — runs only the stack(s) the commit actually touches, derived from the
-# staged file list. Adapted from misaka_site2.0's .githooks/pre-commit (verified recipe),
-# extended to a second stack because this repo is a Vue/JS + Python hybrid.
+# Pre-commit gate — runs the COMMIT-level step of every stack (frontend/, Python) that has staged changes.
+# Commit = staged-file lint + determinism + related tests, within 10 seconds; end of the task (before merge) = the
+# task's one full run (frontend `npm run gate:l1`, Python `py -3.11 quality-gates/run.py l1`). Every touched stack is
+# evaluated before the hook decides pass/fail — a failure in one stack does NOT skip checking the other (see the
+# "checked: | skipped:" summary line at the end). Adapted from misaka_site2.0's .githooks/pre-commit (verified recipe),
+# for a Vue/JS + Python hybrid.
 # Enable once per clone/machine:
 #   git config core.hooksPath .githooks
 # (core.hooksPath is local, per-clone config — it does NOT travel with the repo, so a fresh
 # clone or a new machine has this hook silently absent until the command above is run again.)
+#
+# `if ! cmd; then ...` (not `cmd; if [ $? -ne 0 ]; then ...`) throughout — under `set -e`, a bare `cmd` failing exits
+# the whole script immediately, before its own `$?` check ever runs; `if ! cmd` puts the command in `if`'s test
+# position, which `set -e` does not apply to.
 set -e
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-staged=$(git diff --cached --name-only --diff-filter=ACMR)
+checked=""
+skipped=""
+failed=0
 
-ran_any=0
+# True when a staged path matches one of the given pathspecs, or one of the paths that every block also watches: any
+# requirements*.txt, any file under any quality-gates/ folder (every extension), any determinism canary file, and
+# this hook itself — so a change to a checker, its canaries, a dependency pin or the hook cannot drop a check unseen.
+staged_matches() {
+  git diff --cached --name-only --diff-filter=ACMRD -- "$@" '*requirements*.txt' '*quality-gates/*' '*determinism-canaries/*' '.githooks/pre-commit' | grep -q .
+}
 
-if printf '%s\n' "$staged" | grep -qE '^(frontend/|\.githooks/pre-commit$)'; then
-  ran_any=1
-  echo "[pre-commit] frontend/ changes staged — running gate:l0 (G1 lint-diff, G3 tests+assertions, G4 import cycles)..."
-  (cd "$repo_root/frontend" && npm run gate:l0)
-  status=$?
-  if [ "$status" -ne 0 ]; then
-    echo "[pre-commit] frontend gate:l0 FAILED — commit blocked. Fix the above and retry, or --no-verify to bypass (discouraged, logged as a rule violation)."
-    exit "$status"
+# --- frontend/ (commit level: lint of the staged files, determinism scan, assertion check, related tests) ---
+if staged_matches 'frontend/*'; then
+  echo "[pre-commit] frontend/ changes staged — running gate:commit..."
+  cd "$repo_root/frontend"
+  if ! npm run gate:commit; then
+    echo "[pre-commit] frontend gate:commit FAILED."
+    failed=1
+  else
+    echo "[pre-commit] frontend gate:commit PASSED."
   fi
-  echo "[pre-commit] frontend gate:l0 PASSED."
+  cd "$repo_root"
+  checked="$checked frontend"
+else
+  skipped="$skipped frontend"
 fi
 
-if printf '%s\n' "$staged" | grep -qE '^(app|module|scripts|tests)/.*\.py$|^quality-gates/|^(pyproject\.toml|pytest\.ini|\.githooks/pre-commit)$|(^|/)conftest\.py$'; then
-  ran_any=1
-  echo "[pre-commit] Python changes staged — running quality-gates/run.py l0 (G1 ruff, G2 mypy, G3 pytest+assertions, G4 import-linter)..."
-  py -3.11 quality-gates/run.py l0
-  status=$?
-  if [ "$status" -ne 0 ]; then
-    echo "[pre-commit] Python l0 FAILED — commit blocked. Fix the above and retry, or --no-verify to bypass (discouraged, logged as a rule violation)."
-    exit "$status"
+# --- Python (commit level: ruff on the staged files, determinism scan, assertion check, related tests) ---
+if staged_matches 'app/*.py' 'module/*.py' 'scripts/*.py' 'tests/*.py' 'pyproject.toml' 'pytest.ini' '*conftest.py'; then
+  echo "[pre-commit] Python changes staged — running quality-gates/run.py commit..."
+  if ! py -3.11 quality-gates/run.py commit; then
+    echo "[pre-commit] Python gate commit FAILED."
+    failed=1
+  else
+    echo "[pre-commit] Python gate commit PASSED."
   fi
-  echo "[pre-commit] Python l0 PASSED."
+  checked="$checked python"
+else
+  skipped="$skipped python"
 fi
 
-if [ "$ran_any" -eq 0 ]; then
-  echo "[pre-commit] no frontend/ or Python changes staged — skipping quality gates."
+echo "[pre-commit] checked:${checked:- none} | skipped:${skipped:- none}"
+
+if [ "$failed" -ne 0 ]; then
+  echo "[pre-commit] one or more stacks FAILED — commit blocked. Fix the above and retry, or --no-verify to bypass (discouraged, logged as a rule violation)."
+  exit 1
 fi
 
 exit 0

@@ -1,0 +1,5 @@
+import datetime as d
+
+
+def test_c():
+    assert d.datetime.utcnow().year > 0

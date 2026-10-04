@@ -1,0 +1,7 @@
+import { setTimeout as wait } from 'timers/promises'
+import { expect, it } from 'vitest'
+
+it('c', async () => {
+  await wait(20)
+  expect(1).toBe(1)
+})

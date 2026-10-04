@@ -1,0 +1,11 @@
+import path from 'node:path'
+import { expect, it } from 'vitest'
+import fs from 'node:fs'
+
+// Runtime-guard negative canary: reads are never touched. The guard must let this pass.
+it('c: fs.promises.open for reading a repo file', async () => {
+  const handle = await fs.promises.open(path.resolve(process.cwd(), 'package.json'), 'r')
+  const { size } = await handle.stat()
+  await handle.close()
+  expect(size).toBeGreaterThan(0)
+})

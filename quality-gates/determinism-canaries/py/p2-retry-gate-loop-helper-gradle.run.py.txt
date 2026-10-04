@@ -1,0 +1,11 @@
+import subprocess
+
+
+def execute(arguments):
+    return subprocess.call(arguments)
+
+
+attempts = 0
+while attempts < 2:
+    execute(["gradle", "test"])
+    attempts += 1

@@ -4,8 +4,12 @@ api/quality-gates/run.py, verified recipe; this repo's app/ lives at the repo ro
 api/, so ROOT is the repo root and there's no "cd api first" step).
 
 Usage (from the repo root):
-    py -3.11 quality-gates/run.py <g1|g2|g3|g4|g5|l0|l1> [--update-baseline]
+    py -3.11 quality-gates/run.py <g1|g2|g3|g4|g5|commit|l0|l1> [--update-baseline]
 
+  commit = the fast steps the pre-commit hook runs, within about 10 seconds: ruff on the STAGED .py files only (no
+       mypy, no import-linter), the determinism scan, the assertion check on the staged test files, and pytest on
+       the RELATED test files only (`related_tests.py`: the staged test files plus the test files that import a
+       staged module; none -> it says so and passes). Whole-suite pytest and every whole-tree step stay in l0.
   l0 = G1 (ruff lint, baselined) + G2 (mypy typecheck, baselined) + G3 (pytest + AST
        assertion-presence on changed test functions) + G4 (import-linter layers, baselined) —
        seconds-level. G1/G2/G4 all fail only on NEW findings vs a version-controlled baseline
@@ -31,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.git_diff import ensure_utf8_stdio
+from related_tests import related_test_files
 
 ensure_utf8_stdio()
 
@@ -65,6 +70,25 @@ def g3() -> int:
     if rc != 0:
         return rc
     return _run([sys.executable, str(GATES_DIR / "check_test_determinism.py")])
+
+
+def commit() -> int:
+    """The pre-commit level: staged-file ruff, the determinism scan, the assertion check on staged test files, and the
+    related tests (see the module docstring). l0 stays the end-of-task run."""
+    rc = _run([sys.executable, str(GATES_DIR / "check_ruff_baseline.py"), "--staged"])
+    if rc != 0:
+        return rc
+    rc = _run([sys.executable, str(GATES_DIR / "check_test_determinism.py")])
+    if rc != 0:
+        return rc
+    rc = _run([sys.executable, str(GATES_DIR / "check_test_assertions.py"), "--staged"])
+    if rc != 0:
+        return rc
+    related = related_test_files(ROOT)
+    if not related:
+        print("[commit] no staged test file and no test file importing a staged module - no related test to run.")
+        return 0
+    return _run([sys.executable, "-m", "pytest", "-q", *related])
 
 
 def g4(update_baseline: bool = False) -> int:
@@ -102,7 +126,7 @@ def l1(update_baseline: bool = False) -> int:
     return g5()
 
 
-GATES = {"g1": g1, "g2": g2, "g3": g3, "g4": g4, "g5": g5, "l0": l0, "l1": l1}
+GATES = {"g1": g1, "g2": g2, "g3": g3, "g4": g4, "g5": g5, "commit": commit, "l0": l0, "l1": l1}
 
 
 def main() -> int:

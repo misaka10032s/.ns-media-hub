@@ -75,7 +75,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import baseline as baseline_lib
-from lib.git_diff import ensure_utf8_stdio
+from lib.git_diff import ensure_utf8_stdio, get_staged_files
 
 ensure_utf8_stdio()
 
@@ -105,9 +105,14 @@ def _validate_config() -> str | None:
     return None
 
 
-def _run_ruff() -> tuple[list[dict], str, int]:
+def _staged_in_scope() -> list[str]:
+    """Staged .py files (paths relative to the repo root) that sit under one of SCAN_DIRS."""
+    return [f for f in get_staged_files(ROOT, ["py"]) if f.split("/", 1)[0] in SCAN_DIRS]
+
+
+def _run_ruff(targets: list[str] = SCAN_DIRS) -> tuple[list[dict], str, int]:
     proc = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", *SCAN_DIRS, "--output-format=json", f"--config={CONFIG_PATH}"],
+        [sys.executable, "-m", "ruff", "check", *targets, "--output-format=json", f"--config={CONFIG_PATH}"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -130,7 +135,54 @@ def _identity(item: dict) -> str:
     return f"{rel}|{item['code']}|{item['message']}"
 
 
+def _main_staged() -> int:
+    """The commit-time step: ruff on the staged files only; a finding in them that is not in the baseline fails, and a
+    baseline entry of theirs that vanished fails (the whole-tree run is `run.py g1`, part of l0)."""
+    config_error = _validate_config()
+    if config_error:
+        print(f"[G1] FAIL — ruff config problem: {config_error}", file=sys.stderr)
+        return 2
+    files = _staged_in_scope()
+    if not files:
+        print("[G1] no staged .py file in the ruff scope — nothing to check.")
+        return 0
+    items, stderr, returncode = _run_ruff(files)
+    if returncode not in (0, 1):
+        print(
+            f"[G1] FAIL — ruff exited {returncode} (tool/config error, not a lint result) — "
+            "refusing to treat that as '0 violations':",
+            file=sys.stderr,
+        )
+        print(stderr or "(no stderr captured)", file=sys.stderr)
+        return 2
+    current = sorted({_identity(i) for i in items})
+    staged_set = set(files)
+    baseline = [b for b in baseline_lib.load(BASELINE_PATH) if b.split("|", 1)[0] in staged_set]
+    new, resolved = baseline_lib.diff(current, baseline)
+    for v in resolved:
+        print(f"  - baseline violation no longer detected: {v}", file=sys.stderr)
+    for v in new:
+        print(f"  - NEW ruff violation: {v}", file=sys.stderr)
+    if new or resolved:
+        print(
+            f"\n[G1] FAIL — {len(new)} new and {len(resolved)} vanished ruff violation(s) in {len(files)} staged "
+            "file(s) vs the baseline (fix them, or review and run `run.py g1 --update-baseline`).",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"[G1] PASS — {len(files)} staged file(s), {len(current)} violation(s), 0 new/vanished vs baseline.")
+    return 0
+
+
 def main() -> int:
+    if "--staged" in sys.argv[1:]:
+        if "--update-baseline" in sys.argv[1:]:
+            print(
+                "[G1] --update-baseline needs the whole-tree run: use `run.py g1 --update-baseline`.",
+                file=sys.stderr,
+            )
+            return 2
+        return _main_staged()
     update_mode = "--update-baseline" in sys.argv[1:]
 
     config_error = _validate_config()

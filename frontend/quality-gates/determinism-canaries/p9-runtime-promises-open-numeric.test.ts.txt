@@ -1,0 +1,12 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { expect, it } from 'vitest'
+
+// Runtime-guard canary: copy next to a test file. With src/test-utils/noRepoWrites.ts on (vitest setupFiles) the test
+// passes: the guard throws before anything is created. With the guard off it fails and c.txt exists: delete it.
+const target = path.resolve(process.cwd(), 'c.txt')
+
+it('c: fs.promises.open with numeric write flags', () => {
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
+  expect(() => fs.promises.open(target, flags)).toThrow(/noRepoWrites/)
+})

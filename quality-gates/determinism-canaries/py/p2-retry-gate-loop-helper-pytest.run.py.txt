@@ -1,0 +1,10 @@
+import subprocess
+import sys
+
+
+def run_step(command):
+    return subprocess.run(command).returncode
+
+
+for attempt in range(2):
+    run_step([sys.executable, "-m", "pytest", "-q"])

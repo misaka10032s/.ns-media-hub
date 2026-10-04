@@ -1,0 +1,5 @@
+from datetime import datetime as dt
+
+
+def test_c():
+    assert dt.now().year > 0

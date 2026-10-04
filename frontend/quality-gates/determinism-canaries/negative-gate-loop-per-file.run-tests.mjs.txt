@@ -1,0 +1,7 @@
+import { spawnSync } from 'node:child_process'
+
+const files = ['a.test.ts', 'b.test.ts']
+for (const file of files) {
+  const result = spawnSync('npx', ['vitest', 'run', file])
+  console.log(file, result.status)
+}

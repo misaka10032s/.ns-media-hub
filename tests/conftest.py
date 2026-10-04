@@ -3,10 +3,11 @@
 """
 from __future__ import annotations
 
-import builtins
+import functools
+import importlib.util
 import os
 import shutil
-import sqlite3
+import sys
 import tempfile
 import pytest
 from contextlib import ExitStack
@@ -117,66 +118,112 @@ def _repo_write_target(value) -> Path | None:
     return resolved
 
 
-def _open_writes(mode) -> bool:
-    return isinstance(mode, str) and any(flag in mode for flag in "wax+")
+class RepoWriteBlocked(RuntimeError):
+    """A test, or code it called, tried to write under the repo root outside the system temp folder."""
+
+
+# The guard's session state, read by the audit hook. An audit hook cannot be removed, so it is installed once and does
+# nothing while `active` is off.
+_WRITE_GUARD: dict = {"active": False, "installed": False, "violations": []}
+_WRITE_MODE_CHARS = frozenset("wax+")
+_WRITE_OS_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+# audit event -> the argument positions that name a target path (os.replace raises os.rename; os.unlink raises
+# os.remove; os.makedirs and os.removedirs raise os.mkdir / os.remove / os.rmdir; shutil.copy and copy2 raise
+# shutil.copyfile).
+_AUDIT_TARGETS = {
+    "os.remove": (0,),
+    "os.rename": (0, 1),
+    "os.mkdir": (0,),
+    "os.rmdir": (0,),
+    "os.truncate": (0,),
+    "os.symlink": (1,),
+    "os.link": (1,),
+    "shutil.rmtree": (0,),
+    "shutil.copyfile": (1,),
+    "shutil.copytree": (1,),
+    "shutil.move": (0, 1),
+}
+
+
+def _check_repo_write(value, label: str) -> None:
+    """Raise (and record) when `value` names a path a write must not touch (see `_repo_write_target`)."""
+    target = _repo_write_target(value)
+    if target is not None:
+        message = (
+            f"no-repo-writes guard: {label}() would write {target}, which is inside the "
+            "repo and outside the system temp folder. Route the write through tmp_path."
+        )
+        _WRITE_GUARD["violations"].append(message)
+        raise RepoWriteBlocked(message)
+
+
+def _audit_hook(event, args) -> None:
+    if not _WRITE_GUARD["active"]:
+        return
+    if event == "open":
+        path, mode, flags = args
+        # os.open passes mode None and the real flags; io.FileIO (behind open, io.open, tarfile.open) passes its
+        # mode string with the flags it derived from it
+        writing = (isinstance(flags, int) and flags & _WRITE_OS_FLAGS) or (
+            mode is not None and _WRITE_MODE_CHARS & set(str(mode))
+        )
+        if writing:
+            _check_repo_write(path, "os.open" if mode is None else "open")
+    elif event == "sqlite3.connect":
+        _check_repo_write(args[0], "sqlite3.connect")
+    elif event in _AUDIT_TARGETS:
+        for position in _AUDIT_TARGETS[event]:
+            if position < len(args):
+                _check_repo_write(args[position], event)
+
+
+def _patch_cv2_imwrite():
+    """cv2.imwrite writes from C++ and raises no audit event. Returns the function that undoes the patch."""
+    if importlib.util.find_spec("cv2") is None:
+        return lambda: None
+    import cv2
+
+    original = cv2.imwrite
+
+    @functools.wraps(original)
+    def guarded(filename, *args, **kwargs):
+        _check_repo_write(filename, "cv2.imwrite")
+        return original(filename, *args, **kwargs)
+
+    cv2.imwrite = guarded
+
+    def restore():
+        cv2.imwrite = original
+
+    return restore
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _no_repo_writes():
     """G3(c) pattern P9, runtime half: a static check cannot see a file written by product code a
-    test calls, so every function that creates, changes, moves or removes a file or opens a
-    SQLite file is wrapped for the whole session. A target inside the repo root and outside the
-    system temp folder raises instead of writing. Allowed: `.pytest_cache`, `__pycache__`,
-    `.coverage*`, `coverage.xml`, `htmlcov/`. This sits under (and does not replace) the
-    per-test redirection and guards of `_isolate_every_test_from_the_real_database`."""
-
-    def guarded(original, name: str, indexes: tuple[int, ...], keyword: str | None = None):
-        def wrapper(*args, **kwargs):
-            for index in indexes:
-                value = args[index] if index < len(args) else (kwargs.get(keyword) if keyword and index == indexes[0] else None)
-                target = _repo_write_target(value)
-                if target is not None:
-                    raise RuntimeError(
-                        f"no-repo-writes guard: {name}() would write {target}, which is inside the "
-                        "repo and outside the system temp folder. Route the write through tmp_path."
-                    )
-            return original(*args, **kwargs)
-
-        return wrapper
-
-    def guarded_open(original, name: str, mode_index: int):
-        def wrapper(*args, **kwargs):
-            mode = args[mode_index] if len(args) > mode_index else kwargs.get("mode", "r")
-            if _open_writes(mode):
-                target = _repo_write_target(args[0] if args else kwargs.get("file"))
-                if target is not None:
-                    raise RuntimeError(
-                        f"no-repo-writes guard: {name}() would write {target}, which is inside the "
-                        "repo and outside the system temp folder. Route the write through tmp_path."
-                    )
-            return original(*args, **kwargs)
-
-        return wrapper
-
-    with pytest.MonkeyPatch.context() as session_patch:
-        session_patch.setattr(builtins, "open", guarded_open(builtins.open, "open", 1))
-        session_patch.setattr(Path, "open", guarded_open(Path.open, "Path.open", 1))
-        for name in ("write_text", "write_bytes", "mkdir", "touch", "unlink", "rmdir"):
-            session_patch.setattr(Path, name, guarded(getattr(Path, name), f"Path.{name}", (0,)))
-        for name in ("rename", "replace"):
-            session_patch.setattr(Path, name, guarded(getattr(Path, name), f"Path.{name}", (0, 1)))
-        for name in ("remove", "unlink", "rmdir", "mkdir", "makedirs", "truncate"):
-            session_patch.setattr(os, name, guarded(getattr(os, name), f"os.{name}", (0,), "path"))
-        for name in ("rename", "replace"):
-            session_patch.setattr(os, name, guarded(getattr(os, name), f"os.{name}", (0, 1)))
-        for name in ("symlink", "link"):
-            session_patch.setattr(os, name, guarded(getattr(os, name), f"os.{name}", (1,)))
-        session_patch.setattr(shutil, "rmtree", guarded(shutil.rmtree, "shutil.rmtree", (0,)))
-        for name in ("copy", "copy2", "copyfile", "copytree"):
-            session_patch.setattr(shutil, name, guarded(getattr(shutil, name), f"shutil.{name}", (1,)))
-        session_patch.setattr(shutil, "move", guarded(shutil.move, "shutil.move", (0, 1)))
-        session_patch.setattr(sqlite3, "connect", guarded(sqlite3.connect, "sqlite3.connect", (0,), "database"))
+    test calls. A sys.addaudithook hook reports every file open for writing, remove, rename, mkdir,
+    rmdir, truncate, symlink, link, copy, move and sqlite3 connect before it happens, whatever name
+    the caller bound the function to (`from os import remove`, io.open, os.open, io.FileIO).
+    A target inside the repo root and outside the system temp folder raises RepoWriteBlocked and is
+    recorded: product code that swallows the exception still turns the run red when the session ends.
+    cv2.imwrite writes from C++ and raises no audit event, so it alone is patched, when cv2 is importable.
+    Allowed: `.pytest_cache`, `__pycache__`, `.coverage*`, `coverage.xml`, `htmlcov/`. This sits under
+    (and does not replace) the per-test redirection and guards of
+    `_isolate_every_test_from_the_real_database`."""
+    _WRITE_GUARD["violations"] = []
+    if not _WRITE_GUARD["installed"]:
+        sys.addaudithook(_audit_hook)
+        _WRITE_GUARD["installed"] = True
+    restore_cv2 = _patch_cv2_imwrite()
+    _WRITE_GUARD["active"] = True
+    try:
         yield
+    finally:
+        _WRITE_GUARD["active"] = False
+        restore_cv2()
+    if _WRITE_GUARD["violations"]:
+        report = "\n".join(sorted(set(_WRITE_GUARD["violations"])))
+        pytest.fail("tests wrote under the repo root:\n" + report, pytrace=False)
 
 
 def assert_db_paths_isolated(db_module) -> None:

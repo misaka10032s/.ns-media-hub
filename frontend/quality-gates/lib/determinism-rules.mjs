@@ -107,14 +107,6 @@ function calleeRoot(n) {
   return null
 }
 
-function calleeProps(n) {
-  n = unwrap(n)
-  if (!isNode(n)) return []
-  if (n.type === 'MemberExpression') return [...calleeProps(n.object), propName(n) ?? '?']
-  if (n.type === 'CallExpression') return calleeProps(n.callee)
-  return []
-}
-
 function isIdent(n, name) {
   n = unwrap(n)
   return isNode(n) && n.type === 'Identifier' && n.name === name
@@ -198,7 +190,7 @@ function getIndex(program) {
       imports.set(spec.local.name, { source, imported, node: stmt })
     }
   }
-  idx = { program, parent, nodes, imports, timers: null, spies: null }
+  idx = { program, parent, nodes, imports, timers: null, spies: null, promiseTimers: null }
   INDEX.set(program, idx)
   return idx
 }
@@ -340,9 +332,10 @@ function fakedState(node, idx) {
   let pinnedBySys = false
   for (const scope of scopeChain(node, idx)) {
     const here = timers.filter((t) => t.scope === scope)
-    if (here.some((t) => t.kind === 'real')) continue
     const testLevel = isTestLevelScope(scope, idx)
     const before = (t) => !testLevel || t.call.range[0] < node.range[0]
+    // a switch back to real timers ends the freeze only for what comes after it (a test may clean up at its end)
+    if (here.some((t) => t.kind === 'real' && before(t))) continue
     const fakes = here.filter((t) => t.kind === 'fake' && before(t))
     if (fakes.length > 0) {
       faked = true
@@ -350,7 +343,9 @@ function fakedState(node, idx) {
     }
     if (here.some((t) => t.kind === 'sys' && t.fixed && before(t))) pinnedBySys = true
   }
-  return { faked, pinned: faked && (pinnedByFake || pinnedBySys) }
+  // A clock fixed by a literal `vi.setSystemTime(<fixed>)` counts on its own (vitest then mocks Date alone); a
+  // `vi.useFakeTimers({ now: <fixed> })` counts only as the fake timers that carry it.
+  return { faked, pinned: (faked && pinnedByFake) || pinnedBySys }
 }
 
 const MOCK_METHODS = new Set(['mockReturnValue', 'mockReturnValueOnce', 'mockImplementation', 'mockImplementationOnce'])
@@ -559,6 +554,24 @@ function checkNotKilled(program, context, idx) {
 
 // ---------------------------------------------------------------- P2 — retry
 
+// A loop repeats until success when it counts (a for or while whose test compares a counter) or when its body
+// leaves or restarts it (break, continue, return; not inside a nested function). A loop over a list that runs the
+// runner once per item with no exit is not a retry.
+function retryShaped(loop) {
+  if (loop.type !== 'ForInStatement' && loop.type !== 'ForOfStatement') {
+    const t = loop.test ? unwrap(loop.test) : null
+    if (isNode(t) && t.type === 'BinaryExpression') return true
+  }
+  const stack = [loop.body]
+  while (stack.length > 0) {
+    const m = stack.pop()
+    if (m.type === 'BreakStatement' || m.type === 'ContinueStatement' || m.type === 'ReturnStatement') return true
+    if (isFunctionNode(m)) continue
+    for (const c of children(m)) stack.push(c)
+  }
+  return false
+}
+
 function p2(program, context, idx, { kind }) {
   if (kind === 'config') {
     for (const n of idx.nodes) {
@@ -574,8 +587,8 @@ function p2(program, context, idx, { kind }) {
     }
     const runners = runnerFunctions(idx)
     for (const n of idx.nodes) {
-      if (!LOOP_TYPES.has(n.type)) continue
-      const hit = subtreeNodes(n).some((m) => {
+      if (!LOOP_TYPES.has(n.type) || !retryShaped(n)) continue
+      const hit = subtreeNodes(n.body).some((m) => {
         if (m.type !== 'CallExpression') return false
         if (spawnsRunner(m)) return true
         const c = unwrap(m.callee)
@@ -612,9 +625,79 @@ function testingLibraryNames(idx) {
   return names
 }
 
+// ---- sleeps through node:timers/promises (setTimeout, setInterval, scheduler.wait), under any imported name
+
+const TIMERS_PROMISES_SOURCES = new Set(['node:timers/promises', 'timers/promises'])
+const PROMISE_TIMER_FNS = new Set(['setTimeout', 'setInterval'])
+
+// The module a `require('x')` or `import('x')` expression loads, or null.
+function loadedModule(expr) {
+  let e = unwrap(expr)
+  if (isNode(e) && e.type === 'AwaitExpression') e = unwrap(e.argument)
+  if (!isNode(e)) return null
+  if (e.type === 'ImportExpression') {
+    const s = unwrap(e.source)
+    return isNode(s) && s.type === 'Literal' && typeof s.value === 'string' ? s.value : null
+  }
+  if (e.type === 'CallExpression' && isIdent(e.callee, 'require')) {
+    const a0 = e.arguments[0]
+    return a0 && a0.type === 'Literal' && typeof a0.value === 'string' ? a0.value : null
+  }
+  return null
+}
+
+// named: local name -> 'setTimeout' | 'setInterval' | 'scheduler'; spaces: locals that hold the whole module.
+function timersPromisesBindings(idx) {
+  if (idx.promiseTimers) return idx.promiseTimers
+  const named = new Map()
+  const spaces = new Set()
+  for (const [local, v] of idx.imports) {
+    if (!TIMERS_PROMISES_SOURCES.has(v.source)) continue
+    if (v.imported === '*' || v.imported === 'default') spaces.add(local)
+    else named.set(local, v.imported)
+  }
+  for (const n of idx.nodes) {
+    if (n.type !== 'VariableDeclarator' || !n.init) continue
+    const mod = loadedModule(n.init)
+    if (mod === null || !TIMERS_PROMISES_SOURCES.has(mod)) continue
+    if (n.id.type === 'Identifier') spaces.add(n.id.name)
+    else if (n.id.type === 'ObjectPattern') {
+      for (const p of n.id.properties) {
+        const k = p.type === 'Property' ? keyName(p) : null
+        if (k !== null && p.value.type === 'Identifier') named.set(p.value.name, k)
+      }
+    }
+  }
+  idx.promiseTimers = { named, spaces }
+  return idx.promiseTimers
+}
+
+// 'setTimeout' | 'setInterval' | 'wait' when the callee `c` is one of those timers, else null.
+function promiseTimerFn(c, bindings) {
+  if (c.type === 'Identifier') {
+    const fn = bindings.named.get(c.name)
+    return fn === 'setTimeout' || fn === 'setInterval' ? fn : null
+  }
+  if (c.type !== 'MemberExpression') return null
+  const p = propName(c)
+  const o = unwrap(c.object)
+  if (!isNode(o)) return null
+  if (p === 'wait') {
+    if (o.type === 'Identifier' && bindings.named.get(o.name) === 'scheduler') return 'wait'
+    if (o.type === 'MemberExpression' && propName(o) === 'scheduler') {
+      const base = unwrap(o.object)
+      if (isNode(base) && base.type === 'Identifier' && bindings.spaces.has(base.name)) return 'wait'
+    }
+    return null
+  }
+  if (p !== null && PROMISE_TIMER_FNS.has(p) && o.type === 'Identifier' && bindings.spaces.has(o.name)) return p
+  return null
+}
+
 function p3(program, context, idx, { kind }) {
   if (kind !== 'test') return
   const tl = testingLibraryNames(idx)
+  const promiseTimers = timersPromisesBindings(idx)
   for (const n of idx.nodes) {
     if (LOOP_TYPES.has(n.type)) {
       const cond = n.type === 'ForStatement' ? n.test : n.type === 'ForInStatement' || n.type === 'ForOfStatement' ? n.right : n.test
@@ -624,6 +707,12 @@ function p3(program, context, idx, { kind }) {
     if (n.type !== 'CallExpression') continue
     const c = unwrap(n.callee)
     if (!isNode(c)) continue
+    const promiseFn = promiseTimerFn(c, promiseTimers)
+    if (promiseFn !== null) {
+      // the delay is the first argument here; one zero-delay yield stays allowed, as with the global setTimeout
+      if (promiseFn === 'setInterval' || !isZeroLiteral(n.arguments[0]) || hasLoopAncestor(n, idx)) report(context, n, 'P3 sleep-or-poll')
+      continue
+    }
     let timerName = null
     if (c.type === 'Identifier') timerName = c.name
     else if (c.type === 'MemberExpression') {
@@ -683,8 +772,7 @@ function p4(program, context, idx, { kind }) {
       report(context, n, 'P4 clock-read')
       continue
     }
-    const state = fakedState(n, idx)
-    if (!(state.faked && state.pinned)) report(context, n, 'P4 clock-read')
+    if (!fakedState(n, idx).pinned) report(context, n, 'P4 clock-read')
   }
 }
 

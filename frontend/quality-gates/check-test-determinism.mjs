@@ -15,8 +15,8 @@
 // There is NO way to switch a hit off: no baseline file, no allow-list file, no ignore comment (ESLint
 // runs with allowInlineConfig: false), no environment variable, no flag that skips a rule. The only
 // flag is --root, which picks the package folder to scan. The only exemptions are the coded constructs
-// each rule names. A file that does not parse counts as a hit, because it was not checked (the same
-// rule G3(b) follows).
+// each rule names. A file that does not parse counts as a hit (`P0 parse error`, file:line of the error), because
+// it was not checked (the same rule G3(b) follows), and the run exits non-zero.
 //
 // Usage: node quality-gates/check-test-determinism.mjs [--root <package folder>]   (default: cwd)
 import { ESLint } from 'eslint'
@@ -44,7 +44,11 @@ const TEST_FILE_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/
 const SRC_TEST_TS_RE = /^src\/(?:.*\/)?test\.ts$/
 const HELPER_RE = /\.testUtils\.[cm]?[jt]sx?$/
 const CONFIG_RE = /^(?:vite|vitest|playwright)\.config\.[cm]?[jt]s$|^vitest\.workspace\.[cm]?[jt]s$/
-const EXCLUDED_SEGMENTS = new Set(['node_modules', 'dist', '.stryker-tmp'])
+// Skip list: dependency and tool folders only. A folder named build, env, bin or dist never drops a test file,
+// and coverage output is skipped only outside a test tree (a test folder, or a file named like a test).
+const DEPENDENCY_SEGMENTS = new Set(['node_modules', '.venv', 'venv', '.git', '.stryker-tmp', '__pycache__', 'site-packages', '.tox', 'obj', 'target'])
+const COVERAGE_SEGMENTS = new Set(['coverage'])
+const TEST_FOLDERS = new Set(['tests', 'test', '.test', '__tests__'])
 const ALL_RULES = Object.fromEntries(Object.keys(plugin.rules).map((r) => [`determinism/${r}`, 'error']))
 const TEST_COMMAND = /\b(?:npm\s+(?:run\s+)?(?:test|gate[\w:.-]*)|npx\s+vitest|vitest|jest|playwright|stryker|pytest|run\.py|dotnet\s+test|mvn\b|gate-[\w-]+\.(?:sh|ps1))/i
 
@@ -92,9 +96,10 @@ function isCheckerOwn(abs) {
 
 function classify(rel) {
   const segments = rel.split('/')
-  if (segments.some((s) => EXCLUDED_SEGMENTS.has(s))) return null
   const base = segments[segments.length - 1]
   const isTestPattern = TEST_FILE_RE.test(rel) || SRC_TEST_TS_RE.test(rel)
+  if (segments.some((s) => DEPENDENCY_SEGMENTS.has(s))) return null
+  if (!isTestPattern && !segments.slice(0, -1).some((s) => TEST_FOLDERS.has(s)) && segments.some((s) => COVERAGE_SEGMENTS.has(s))) return null
   const gateIdx = segments.findIndex((s) => s.startsWith('quality-gates'))
   if (CODE_EXT.test(rel)) {
     if (isTestPattern || HELPER_RE.test(rel) || segments.includes('test-utils') || segments.slice(0, -1).includes('.test')) return 'test'
@@ -121,7 +126,7 @@ function scanPackageJson(abs) {
   try {
     pkg = JSON.parse(text)
   } catch (err) {
-    return [{ line: 1, tag: 'PARSE', text: `[PARSE] package.json does not parse (file not checked): ${err.message}` }]
+    return [{ line: 1, tag: 'P0', text: `[P0 parse error] package.json does not parse (file not checked): ${err.message}` }]
   }
   for (const [name, command] of Object.entries(pkg.scripts ?? {})) {
     const at = Math.max(text.indexOf(`"${name}"`), 0)
@@ -243,11 +248,11 @@ async function main() {
     for (const result of results) {
       for (const msg of result.messages) {
         if (msg.fatal) {
-          addHit(result.filePath, msg.line ?? 1, 'PARSE', `[PARSE] file not checked: ${msg.message}`)
+          addHit(result.filePath, msg.line ?? 1, 'P0', `[P0 parse error] file not checked: ${msg.message}`)
         } else if (msg.ruleId && msg.ruleId.startsWith('determinism/')) {
           addHit(result.filePath, msg.line, /^\[(\S+)/.exec(msg.message)?.[1] ?? msg.ruleId, msg.message)
         } else if (!msg.ruleId && /^File ignored/.test(msg.message)) {
-          addHit(result.filePath, 1, 'IGNORED', `[IGNORED] file not checked: ${msg.message}`)
+          addHit(result.filePath, 1, 'IGNORED', `[P0 parse error] file not checked (ignored by ESLint): ${msg.message}`)
         }
       }
     }

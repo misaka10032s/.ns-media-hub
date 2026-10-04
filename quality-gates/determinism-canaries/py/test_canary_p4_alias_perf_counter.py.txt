@@ -1,0 +1,7 @@
+import time
+
+stopwatch = time.perf_counter
+
+
+def test_c():
+    assert stopwatch() > 0

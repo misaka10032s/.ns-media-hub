@@ -1,0 +1,7 @@
+import time
+
+clock = time.time
+
+
+def test_c():
+    assert clock() > 0

@@ -11,7 +11,10 @@ The patterns (one tag each in the output):
 Whole scope on every run, never diff-scoped, and no way to switch a hit off: no baseline file, no
 allow-list file, no ignore comment, no environment variable, no flag that skips a rule. The only
 options pick WHAT to scan (`--stack`, `--root`). The only exemptions are the coded constructs each
-rule names. A file that does not parse counts as a hit, because it was not checked.
+rule names. A file that does not parse counts as a hit (`P0 parse error`, file:line of the error), because it
+was not checked, and the run exits non-zero. Python files are parsed with `ast`; the token stacks (cs, java, ts)
+have no parser here, so their parse check is the bracket nesting of the source with comments, strings and
+regex literals blanked out.
 
 Stacks:
   py    (default) Python tests, scope = what pytest collects (testpaths / python_files from the
@@ -47,13 +50,18 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-SKIP_DIRS = {
-    ".git", "node_modules", ".venv", "venv", "env", "__pycache__", "site-packages", ".tox", "build", "dist", "bin",
-    "obj", "target", ".stryker-tmp",
-}
+# Skip list: dependency and tool folders only. A folder named build, env, bin or dist never drops a test file,
+# and coverage output is skipped only outside a test tree (a test folder, or a file named like a test).
+DEPENDENCY_DIRS = {".git", "node_modules", ".venv", "venv", ".stryker-tmp", "__pycache__", "site-packages", ".tox", "obj", "target"}
+COVERAGE_DIRS = {"coverage", "htmlcov"}
+TEST_FOLDER_NAMES = {"tests", "test", ".test", "__tests__"}
+TEST_FILE_NAME = re.compile(r"^test_|_test\.py$|\.(?:test|spec)\.[cm]?[jt]sx?$|Tests?\.(?:cs|java)$")
+# A test runner named in the arguments of a call: pytest, vitest, jest, playwright, stryker, npm test,
+# dotnet test, mvn test, gradle test.
 RUNNER_TOKEN = re.compile(
-    r"(?:^|[\s/\\])(?:vitest|jest|playwright|stryker|pytest|mvn)(?:$|[\s./\\-])"
-    r"|npm(?:\s+run)?\s+test|dotnet\s+test",
+    r"(?:^|[\s/\\])(?:vitest|jest|playwright|stryker|pytest)(?:$|[\s./\\-])"
+    r"|npm(?:\s+run)?\s+test|dotnet\s+test"
+    r"|(?:^|[\s/\\])(?:mvnw?|gradlew?)(?:\.cmd|\.bat)?\s+(?:\S+\s+)*test\b",
     re.I,
 )
 TEST_COMMAND = re.compile(
@@ -61,6 +69,10 @@ TEST_COMMAND = re.compile(
     r"|dotnet\s+test|mvn\b|gate-[\w-]+\.(?:sh|ps1))",
     re.I,
 )
+SUBPROCESS_CALLS = {
+    "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen",
+    "os.system",
+}
 SQLITE_RELATIVE = re.compile(r"sqlite:/{3}(?!/|:memory:)[^\s'\"`]")
 
 Hit = tuple[int, str, str]  # line, tag label, text
@@ -101,7 +113,12 @@ def read(path: Path) -> str:
 
 
 def skipped_dir(rel: str) -> bool:
-    return any(seg in SKIP_DIRS for seg in rel.split("/")[:-1])
+    segs = rel.split("/")
+    folders = segs[:-1]
+    if any(seg in DEPENDENCY_DIRS for seg in folders):
+        return True
+    in_test_tree = any(seg in TEST_FOLDER_NAMES for seg in folders) or TEST_FILE_NAME.search(segs[-1]) is not None
+    return not in_test_tree and any(seg in COVERAGE_DIRS for seg in folders)
 
 
 def gate_index(rel: str) -> int:
@@ -214,6 +231,7 @@ TORCH_RANDOM = {
     "rand", "randn", "randint", "randperm", "normal", "rand_like", "randn_like", "randint_like", "bernoulli",
     "multinomial",
 }
+LOOP_FACTORIES = {"asyncio.get_event_loop", "asyncio.get_running_loop", "asyncio.new_event_loop"}
 WAIT_METHODS = {"wait", "join", "result", "exception", "acquire", "communicate", "wait_for"}
 SKIP_ATTRS = {
     "pytest.mark.skip", "pytest.mark.skipif", "pytest.mark.xfail", "unittest.skip", "unittest.skipIf",
@@ -292,6 +310,8 @@ class PythonScan:
                     if alias.name != "*":
                         self.imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
         self.hits: list[Hit] = []
+        self.aliases: dict[str, str] = {}
+        self._collect_clock_aliases()
         self.file_frozen = self._file_frozen()
 
     # -- helpers
@@ -299,9 +319,28 @@ class PythonScan:
         line = getattr(node, "lineno", 1)
         self.hits.append((line, label, snippet(self.lines, line)))
 
+    def _collect_clock_aliases(self) -> None:
+        """`clock = time.time` binds a clock function to a plain name: remember it, so `clock()` is a clock read.
+        Two passes, so an alias of an alias is found too."""
+        for _ in range(2):
+            for node in ast.walk(self.tree):
+                if isinstance(node, ast.Assign):
+                    targets, value = node.targets, node.value
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    targets, value = [node.target], node.value
+                else:
+                    continue
+                if not isinstance(value, (ast.Name, ast.Attribute)):
+                    continue
+                target_name = self.dotted(value)
+                if target_name in CLOCK_CALLS:
+                    for t in targets:
+                        if isinstance(t, ast.Name):
+                            self.aliases[t.id] = target_name
+
     def dotted(self, node: ast.AST | None) -> str | None:
         if isinstance(node, ast.Name):
-            return self.imports.get(node.id, node.id)
+            return self.aliases.get(node.id) or self.imports.get(node.id, node.id)
         if isinstance(node, ast.Attribute):
             base = self.dotted(node.value)
             return None if base is None else f"{base}.{node.attr}"
@@ -315,8 +354,26 @@ class PythonScan:
             cur = self.parent.get(cur)
         return out
 
+    def is_loop_time(self, call: ast.Call) -> bool:
+        """`loop.time()`, `asyncio.get_event_loop().time()`, `asyncio.get_running_loop().time()`: the loop's own clock."""
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "time" and not call.args and not call.keywords):
+            return False
+        receiver = func.value
+        if isinstance(receiver, ast.Call):
+            return self.dotted(receiver.func) in LOOP_FACTORIES
+        if isinstance(receiver, ast.Name):
+            if receiver.id in ("loop", "event_loop"):
+                return True
+            value = self.assigned_value(receiver.id, receiver)
+            return isinstance(value, ast.Call) and self.dotted(value.func) in LOOP_FACTORIES
+        return False
+
+    def is_clock_call(self, node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and (self.dotted(node.func) in CLOCK_CALLS or self.is_loop_time(node))
+
     def reads_clock(self, node: ast.AST) -> bool:
-        return any(isinstance(n, ast.Call) and self.dotted(n.func) in CLOCK_CALLS for n in ast.walk(node))
+        return any(self.is_clock_call(n) for n in ast.walk(node))
 
     def own_nodes(self, scope: ast.AST) -> list[ast.AST]:
         """Nodes of `scope` that are not inside a nested function, class or lambda."""
@@ -483,51 +540,78 @@ class PythonScan:
         return self.hits
 
     def gate_rules(self) -> None:
-        runners = self.runner_functions()
+        subprocess_fns, runner_fns = self.runner_functions()
         for node in ast.walk(self.tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.match(r"^--reruns\b", node.value):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.match(r"^--reruns", node.value):
                 self.add(node, "P2 retry")
-            if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-                for n in ast.walk(node):
-                    if isinstance(n, ast.Call) and (
-                        self.spawns_runner(n) or (isinstance(n.func, ast.Name) and n.func.id in runners)
-                    ):
-                        self.add(node, "P2 retry")
-                        break
+            if isinstance(node, (ast.For, ast.AsyncFor, ast.While)) and self.retry_shaped(node):
+                for stmt in node.body:
+                    for n in ast.walk(stmt):
+                        if isinstance(n, ast.Call) and self.runs_runner(n, subprocess_fns, runner_fns):
+                            self.add(n, "P2 retry")  # on the line of the call, not of the loop
 
-    def spawns_runner(self, call: ast.Call) -> bool:
-        name = self.dotted(call.func) or ""
-        attr = call.func.attr if isinstance(call.func, ast.Attribute) else name
-        if not (
-            name.startswith(("subprocess.", "os.system", "os.popen"))
-            or attr in ("run", "call", "check_call", "check_output", "Popen")
-        ):
-            return False
+    def retry_shaped(self, loop: ast.AST) -> bool:
+        """True when the loop repeats until success: it counts (range(...), a counter test) or it leaves the loop.
+        A loop over a list of files or packages that runs the runner once per item, with no exit, is not a retry."""
+        if isinstance(loop, (ast.For, ast.AsyncFor)):
+            if isinstance(loop.iter, ast.Call) and self.dotted(loop.iter.func) == "range":
+                return True
+        elif isinstance(loop.test, ast.Compare):
+            return True
+        for stmt in loop.body:
+            for n in ast.walk(stmt):
+                if isinstance(n, (ast.Break, ast.Return)) or (isinstance(n, ast.Continue) and isinstance(loop, ast.While)):
+                    return True
+        return False
+
+    def is_subprocess_call(self, call: ast.Call) -> bool:
+        return self.dotted(call.func) in SUBPROCESS_CALLS
+
+    def runs_runner(self, call: ast.Call, subprocess_fns: set[str], runner_fns: set[str]) -> bool:
+        """A subprocess call with a runner name in its arguments, or a call to a function of this file that makes a
+        subprocess call (with the runner name in this call's arguments, or inside that function)."""
+        if self.is_subprocess_call(call):
+            return self.passes_runner(call)
+        if isinstance(call.func, ast.Name):
+            if call.func.id in runner_fns:
+                return True
+            if call.func.id in subprocess_fns:
+                return self.passes_runner(call)
+        return False
+
+    def passes_runner(self, call: ast.Call) -> bool:
+        """True when any argument of the call names a test runner."""
         pieces = [
             n.value
-            for a in call.args
+            for a in [*call.args, *(k.value for k in call.keywords)]
             for n in ast.walk(a)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
         ]
         return bool(RUNNER_TOKEN.search(" ".join(pieces)))
 
-    def runner_functions(self) -> set[str]:
+    def runner_functions(self) -> tuple[set[str], set[str]]:
+        """(functions of this file that make a subprocess call, directly or through another one of them;
+        the subset whose own body names a test runner in such a call)."""
         fns = {n.name: n for n in ast.walk(self.tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        subs: set[str] = set()
         runners: set[str] = set()
         changed = True
         while changed:
             changed = False
             for name, fn in fns.items():
-                if name in runners:
-                    continue
                 for n in ast.walk(fn):
-                    if isinstance(n, ast.Call) and (
-                        self.spawns_runner(n) or (isinstance(n.func, ast.Name) and n.func.id in runners)
-                    ):
-                        runners.add(name)
-                        changed = True
-                        break
-        return runners
+                    if not isinstance(n, ast.Call):
+                        continue
+                    callee = n.func.id if isinstance(n.func, ast.Name) else None
+                    if self.is_subprocess_call(n) or callee in subs:
+                        if name not in subs:
+                            subs.add(name)
+                            changed = True
+                    if (self.is_subprocess_call(n) and self.passes_runner(n)) or callee in runners:
+                        if name not in runners:
+                            runners.add(name)
+                            changed = True
+        return subs, runners
 
     def test_rules(self) -> None:
         for node in ast.walk(self.tree):
@@ -614,7 +698,10 @@ class PythonScan:
 
     # P4 — a real clock read
     def p4(self, node: ast.AST) -> None:
-        if isinstance(node, ast.Call) and self.dotted(node.func) in CLOCK_CALLS and not self.in_frozen_scope(node):
+        if not isinstance(node, ast.Call):
+            return
+        # the loop's own clock (loop.time()) is not frozen by time_machine or freezegun
+        if self.is_loop_time(node) or (self.dotted(node.func) in CLOCK_CALLS and not self.in_frozen_scope(node)):
             self.add(node, "P4 clock-read")
 
     # P5 — unseeded randomness
@@ -626,8 +713,8 @@ class PythonScan:
         hit = False
         if name.startswith("random.") and name.split(".", 1)[1] in RANDOM_FUNCS:
             hit = True
-        elif name == "random.Random":
-            hit = no_args
+        elif name in ("random.Random", "random.seed"):
+            hit = no_args or self.none_argument(node)
         elif name == "random.SystemRandom":
             hit = True
         elif name in ("numpy.random.default_rng", "numpy.random.RandomState"):
@@ -647,6 +734,11 @@ class PythonScan:
             hit = not seeded
         if hit:
             self.add(node, "P5 unseeded-random")
+
+    def none_argument(self, call: ast.Call) -> bool:
+        """`random.Random(None)` / `random.seed(None)`: the explicit form of "no seed"."""
+        arg = call.args[0] if call.args else next((k.value for k in call.keywords if k.arg in ("a", "x")), None)
+        return isinstance(arg, ast.Constant) and arg.value is None
 
     # P6 — a dynamic import or module reset inside a test, fixture, setUp or tearDown
     def p6(self, node: ast.AST) -> None:
@@ -707,36 +799,69 @@ class PythonScan:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             self.silent_return(node)
 
-    def has_assertion(self, node: ast.AST) -> bool:
-        for n in ast.walk(node):
-            if isinstance(n, ast.Assert):
+    def is_assertion(self, n: ast.AST) -> bool:
+        if isinstance(n, ast.Assert):
+            return True
+        if isinstance(n, ast.Call):
+            called = (
+                n.func.attr
+                if isinstance(n.func, ast.Attribute)
+                else (n.func.id if isinstance(n.func, ast.Name) else "")
+            )
+            if called.startswith(("assert", "expect")):
                 return True
-            if isinstance(n, ast.Call):
-                called = (
-                    n.func.attr
-                    if isinstance(n.func, ast.Attribute)
-                    else (n.func.id if isinstance(n.func, ast.Name) else "")
-                )
-                if called.startswith(("assert", "expect")):
+        if isinstance(n, ast.With):
+            for item in n.items:
+                call = item.context_expr
+                if isinstance(call, ast.Call) and self.dotted(call.func) in ("pytest.raises", "pytest.warns"):
                     return True
-            if isinstance(n, ast.With):
-                for item in n.items:
-                    call = item.context_expr
-                    if isinstance(call, ast.Call) and self.dotted(call.func) in ("pytest.raises", "pytest.warns"):
-                        return True
         return False
 
+    def has_assertion(self, node: ast.AST) -> bool:
+        return any(self.is_assertion(n) for n in ast.walk(node))
+
     def silent_return(self, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """A `return` the test reaches before its first assertion. Reported on the `return` line."""
         seen_assert = False
         for stmt in fn.body:
             asserts = self.has_assertion(stmt)
             if not seen_assert and not asserts:
-                if isinstance(stmt, ast.Return) or (
-                    isinstance(stmt, ast.If) and any(isinstance(s, ast.Return) for s in stmt.body)
-                ):
+                if isinstance(stmt, ast.Return):
                     self.add(stmt, "P8 skip")
+                elif isinstance(stmt, ast.If):
+                    for s in stmt.body:
+                        if isinstance(s, ast.Return):
+                            self.add(s, "P8 skip")
             if asserts:
                 seen_assert = True
+        self.try_returns(fn)
+
+    def try_returns(self, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """A `return` inside a try/except that the test reaches before its first assertion: either the return
+        comes before that assertion, or it sits in an except handler of a try whose body holds the assertion
+        (an exception earlier in the body skips it). Reported on the `return` line."""
+        own = self.own_nodes(fn)
+        asserts = [(n.lineno, n.col_offset) for n in own if self.is_assertion(n)]
+        first = min(asserts) if asserts else None
+        for node in own:
+            if not isinstance(node, ast.Try | ast.TryStar):
+                continue
+            handler_returns = {
+                id(r)
+                for h in node.handlers
+                for r in self.own_nodes(h)
+                if isinstance(r, ast.Return)
+            }
+            body_start = (node.body[0].lineno, node.body[0].col_offset)
+            last = node.body[-1]
+            body_end = (last.end_lineno or last.lineno, last.end_col_offset or 0)
+            assertion_in_body = first is not None and body_start <= first <= body_end
+            for r in self.own_nodes(node):
+                if not isinstance(r, ast.Return):
+                    continue
+                before_first = first is None or (r.lineno, r.col_offset) < first
+                if before_first or (id(r) in handler_returns and assertion_in_body):
+                    self.add(r, "P8 skip")
 
     # P9 — a write to a real repo path
     def p9(self, node: ast.AST) -> None:
@@ -858,7 +983,7 @@ def scan_pytest_config(name: str, text: str) -> list[Hit]:
         else:
             configparser.ConfigParser(interpolation=None, strict=False).read_string(text)
     except (tomllib.TOMLDecodeError, configparser.Error) as err:
-        return [(1, "PARSE", f"{base} does not parse (file not checked): {err}"[:160])]
+        return [(1, "P0 parse error", f"{base} does not parse (file not checked): {err}"[:160])]
     hits: list[Hit] = []
     in_section = base == "pytest.ini"
     for i, raw in enumerate(text.split("\n")):
@@ -894,9 +1019,6 @@ def scan_requirements(text: str) -> list[Hit]:
         if re.search(r"pytest[-_]rerunfailures", line, re.I) or re.match(r"""^\s*["']?flaky\b""", line, re.I):
             hits.append((i + 1, "P2 retry", raw.strip()[:160]))
     return hits
-
-
-TEST_FOLDER_NAMES = {"tests", "test", ".test"}
 
 
 # Scope rule: a .py file under a pytest testpath is in scope only if (a) its name matches the pytest
@@ -944,6 +1066,44 @@ def python_test_scope(root: Path, files: list[str]) -> tuple[set[str], set[str]]
 
 
 # ---------------------------------------------------------------------------- C# and Java (token rules)
+
+
+REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%~^")
+REGEX_KEYWORDS = {"return", "typeof", "case", "in", "of", "do", "else", "void", "delete", "throw", "new", "yield", "await"}
+
+
+def regex_allowed_before(text: str, i: int) -> bool:
+    """Whether a `/` at text[i] starts a regex literal (not a division): the token before it is an operator,
+    an opening bracket, a keyword or nothing. `<` is left out so JSX closing tags are never read as regexes."""
+    j = i - 1
+    while j >= 0 and text[j] in " \t\r\n":
+        j -= 1
+    if j < 0:
+        return True
+    if text[j] in REGEX_PRECEDERS:
+        return True
+    m = re.search(r"[A-Za-z_$][\w$]*$", text[:j + 1])
+    return m is not None and m.group(0) in REGEX_KEYWORDS
+
+
+def regex_literal_end(text: str, i: int) -> int | None:
+    """Index just after the closing `/` of the regex literal that opens at text[i], or None when the line ends first."""
+    j = i + 1
+    in_class = False
+    n = len(text)
+    while j < n and text[j] != "\n":
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "[":
+            in_class = True
+        elif ch == "]":
+            in_class = False
+        elif ch == "/" and not in_class:
+            return j + 1
+        j += 1
+    return None
 
 
 def blank_source(text: str, csharp: bool, ts: bool = False) -> str:
@@ -1010,6 +1170,13 @@ def blank_source(text: str, csharp: bool, ts: bool = False) -> str:
                 i += 2 if text[i] == "\\" else 1
             i += 1
             blank(start, i)
+        elif ts and c == "/" and regex_allowed_before(text, i):
+            end = regex_literal_end(text, i)
+            if end is None:
+                i += 1
+            else:
+                blank(i, end)
+                i = end
         else:
             i += 1
     return "".join(out)
@@ -1049,7 +1216,11 @@ ANCHOR_TOKEN = re.compile(
     r"AppContext\s*\.\s*BaseDirectory|Directory\s*\.\s*GetCurrentDirectory\s*\(\s*\)"
     r"|Environment\s*\.\s*CurrentDirectory|user\.dir"
 )
-WRAPPER = re.compile(r"^\s*(?:Paths\s*\.\s*get|Path\s*\.\s*of|Path\s*\.\s*Combine|new\s+File|new\s+FileInfo)\s*\(\s*")
+# A path wrapper, plain or fully qualified (`Paths.get(`, `java.nio.file.Paths.get(`, `new java.io.File(`).
+WRAPPER = re.compile(
+    r"^\s*(?:(?:\w+\s*\.\s*)*(?:Paths\s*\.\s*get|Path\s*\.\s*of|Path\s*\.\s*Combine)"
+    r"|new\s+(?:\w+\s*\.\s*)*(?:File|FileInfo))\s*\(\s*"
+)
 
 
 def text_taint(expr: str, whole: str, depth: int = 0) -> str | None:
@@ -1094,7 +1265,7 @@ def cs_rules() -> list[TokenRule]:
         return not spans or raw[spans[0][0]:spans[0][1]].strip() != "0"
 
     def write_to_repo(m: re.Match[str], raw: str, blanked: str) -> bool:
-        spans = call_args(blanked, m.end() - 1)
+        spans = call_args(blanked, m.end() - 1, raw)
         if not spans:
             return False
         taints = [text_taint(raw[a:b], raw) for a, b in spans]
@@ -1136,7 +1307,7 @@ def cs_rules() -> list[TokenRule]:
 
 def java_rules() -> list[TokenRule]:
     def write_to_repo(m: re.Match[str], raw: str, blanked: str) -> bool:
-        spans = call_args(blanked, m.end() - 1)
+        spans = call_args(blanked, m.end() - 1, raw)
         if not spans:
             return False
         taints = [text_taint(raw[a:b], raw) for a, b in spans]
@@ -1145,8 +1316,8 @@ def java_rules() -> list[TokenRule]:
     return [
         TokenRule("P1 time-limit", r"@Timeout\b"),
         TokenRule("P1 time-limit", r"\bassertTimeout(?:Preemptively)?\s*\("),
-        TokenRule("P1 time-limit", r"\.\s*get\s*\(\s*[^,()]+,\s*TimeUnit\s*\."),
-        TokenRule("P1 time-limit", r"\.\s*await\s*\(\s*[^,()]+,\s*TimeUnit\s*\."),
+        TokenRule("P1 time-limit", r"\.\s*get\s*\(\s*[^,()]+,\s*(?:\w+\s*\.\s*)*TimeUnit\s*\."),
+        TokenRule("P1 time-limit", r"\.\s*await\s*\(\s*[^,()]+,\s*(?:\w+\s*\.\s*)*TimeUnit\s*\."),
         TokenRule("P1 time-limit", r"\.\s*join\s*\(\s*\d"),
         TokenRule("P2 retry", r"@(?:RetryingTest|RepeatedIfExceptionsTest)\b"),
         TokenRule("P3 sleep-or-poll", r"\bThread\s*\.\s*sleep\s*\("),
@@ -1159,10 +1330,10 @@ def java_rules() -> list[TokenRule]:
             r"\b(?:Instant|LocalDate|LocalDateTime|LocalTime|ZonedDateTime|OffsetDateTime)\s*\.\s*now\s*\(\s*\)",
         ),
         TokenRule("P4 clock-read", r"\bClock\s*\.\s*system(?:UTC|DefaultZone)\s*\("),
-        TokenRule("P5 unseeded-random", r"\bnew\s+Random\s*\(\s*\)"),
+        TokenRule("P5 unseeded-random", r"\bnew\s+(?:\w+\s*\.\s*)*Random\s*\(\s*\)"),
         TokenRule("P5 unseeded-random", r"\bMath\s*\.\s*random\s*\("),
         TokenRule("P5 unseeded-random", r"\bThreadLocalRandom\b"),
-        TokenRule("P5 unseeded-random", r"\bnew\s+SecureRandom\s*\(\s*\)"),
+        TokenRule("P5 unseeded-random", r"\bnew\s+(?:\w+\s*\.\s*)*SecureRandom\s*\(\s*\)"),
         TokenRule("P8 skip", r"@Disabled\b"),
         TokenRule("P8 skip", r"@(?:Disabled|Enabled)On\w+"),
         TokenRule("P8 skip", r"@(?:Enabled|Disabled)If\w*"),
@@ -1170,17 +1341,40 @@ def java_rules() -> list[TokenRule]:
         TokenRule("P8 skip", r"\bassume(?:True|False|That|NotNull)\s*\("),
         TokenRule(
             "P9 repo-write",
-            r"\bFiles\s*\.\s*(?:write\w*|createDirector(?:y|ies)|createFile|delete\w*|move|copy)\s*\(",
+            r"\bFiles\s*\.\s*(?:write\w*|newBufferedWriter|createDirector(?:y|ies)|createFile|delete\w*|move|copy)\s*\(",
             write_to_repo,
         ),
-        TokenRule("P9 repo-write", r"\bnew\s+(?:FileOutputStream|FileWriter)\s*\(", write_to_repo),
+        TokenRule(
+            "P9 repo-write", r"\bnew\s+(?:\w+\s*\.\s*)*(?:FileOutputStream|FileWriter)\s*\(", write_to_repo
+        ),
     ]
+
+
+def bracket_error(blanked: str) -> tuple[int, str] | None:
+    """The first break in the nesting of ( [ { in source whose comments, strings and regex literals are blanked:
+    (line, message), or None. The token stacks have no parser, so this is their parse check."""
+    closing = {")": "(", "]": "[", "}": "{"}
+    stack: list[tuple[str, int]] = []
+    for i, ch in enumerate(blanked):
+        if ch in "([{":
+            stack.append((ch, i))
+        elif ch in ")]}":
+            if not stack or stack[-1][0] != closing[ch]:
+                return line_at(blanked, i), f"unexpected '{ch}'"
+            stack.pop()
+    if stack:
+        ch, i = stack[-1]
+        return line_at(blanked, i), f"'{ch}' is never closed"
+    return None
 
 
 def scan_tokens(text: str, rules: list[TokenRule], csharp: bool) -> list[Hit]:
     blanked = blank_source(text, csharp)
     lines = text.splitlines()
     hits: list[Hit] = []
+    broken = bracket_error(blanked)
+    if broken is not None:
+        return [(broken[0], "P0 parse error", f"file not checked: {broken[1]}")]
     for rule in rules:
         for m in rule.regex.finditer(blanked):
             if rule.check is not None and not rule.check(m, text, blanked):
@@ -1441,16 +1635,19 @@ class TsScan:
         faked = pinned_by_fake = pinned_by_sys = False
         for scope in self.chain(pos):
             here = [t for t in self.timers() if t["scope"] == scope]
-            if any(t["kind"] == "real" for t in here):
-                continue
             test_level = self.test_level(scope)
+            # a switch back to real timers ends the freeze only for what comes after it (a test may clean up at its end)
+            if any(t["kind"] == "real" and (not test_level or t["pos"] < pos) for t in here):
+                continue
             fakes = [t for t in here if t["kind"] == "fake" and (not test_level or t["pos"] < pos)]
             if fakes:
                 faked = True
                 pinned_by_fake = pinned_by_fake or any(t["pinned"] for t in fakes)
             if any(t["kind"] == "sys" and t["fixed"] and (not test_level or t["pos"] < pos) for t in here):
                 pinned_by_sys = True
-        return faked, faked and (pinned_by_fake or pinned_by_sys)
+        # A clock fixed by a literal `vi.setSystemTime(<fixed>)` counts on its own (vitest then mocks Date alone); a
+        # `vi.useFakeTimers({ now: <fixed> })` counts only as the fake timers that carry it.
+        return faked, (faked and pinned_by_fake) or pinned_by_sys
 
     def spies(self) -> list[dict]:
         if self._spies is None:
@@ -1504,6 +1701,10 @@ class TsScan:
 
     # -- the rules
     def run(self) -> list[Hit]:
+        broken = bracket_error(self.b)
+        if broken is not None:  # not parsed, so not checked: that alone is the hit
+            self.hits.append((broken[0], "P0 parse error", f"file not checked: {broken[1]}"))
+            return self.hits
         if self.kind == "config":
             self.config_rules()
         else:
@@ -1556,11 +1757,61 @@ class TsScan:
                 if t.startswith("{") and re.search(r"(?<![\w$.])(?:retry|retries)\s*:", t):
                     self.hit(self.first(a, b), "P2 retry")
 
+    # sleeps through node:timers/promises (setTimeout, setInterval, scheduler.wait), under any imported name
+    def promise_timer_sleeps(self) -> set[int]:
+        """Reports those sleeps; returns the positions of the calls it saw (the global-setTimeout rule skips them)."""
+        source = r"""['"](?:node:)?timers/promises['"]"""
+        named: dict[str, str] = {}
+        spaces: set[str] = set()
+        for m in re.finditer(r"import\s*\{([^}]*)\}\s*from\s*" + source, self.raw):
+            for part in m.group(1).split(","):
+                bits = re.split(r"\s+as\s+", part.strip())
+                if bits[0]:
+                    named[bits[-1].strip()] = bits[0].strip()
+        for m in re.finditer(r"import\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s*" + source, self.raw):
+            spaces.add(m.group(1))
+        loaded = r"=\s*(?:await\s+)?(?:require\s*\(|import\s*\()\s*" + source
+        for m in re.finditer(r"(?:const|let|var)\s*\{([^}]*)\}\s*" + loaded, self.raw):
+            for part in m.group(1).split(","):
+                bits = re.split(r"\s*:\s*", part.strip())
+                if bits[0]:
+                    named[bits[-1].split("=")[0].strip()] = bits[0].strip()
+        for m in re.finditer(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*" + loaded, self.raw):
+            spaces.add(m.group(1))
+        seen: set[int] = set()
+        calls: list[tuple[int, str]] = []
+        for local, fn in named.items():
+            if fn in ("setTimeout", "setInterval"):
+                for m in re.finditer(r"(?<![\w$.])" + re.escape(local) + r"\s*\(", self.b):
+                    calls.append((m.start(), fn))
+            elif fn == "scheduler":
+                for m in re.finditer(r"(?<![\w$.])" + re.escape(local) + r"\s*\.\s*wait\s*\(", self.b):
+                    calls.append((m.start(), "wait"))
+        for local in spaces:
+            for m in re.finditer(
+                r"(?<![\w$.])" + re.escape(local) + r"\s*\.\s*(setTimeout|setInterval)\s*\(", self.b
+            ):
+                calls.append((m.start(), m.group(1)))
+            for m in re.finditer(r"(?<![\w$.])" + re.escape(local) + r"\s*\.\s*scheduler\s*\.\s*wait\s*\(", self.b):
+                calls.append((m.start(), "wait"))
+        for pos, fn in calls:
+            seen.add(pos)
+            open_at = self.b.index("(", pos)
+            spans = self.args(open_at)
+            zero = bool(spans) and self.raw[spans[0][0]:spans[0][1]].strip() == "0"
+            # the delay is the first argument here; one zero-delay yield stays allowed, as with the global setTimeout
+            if fn == "setInterval" or not zero or self.in_loop(pos):
+                self.hit(pos, "P3 sleep-or-poll")
+        return seen
+
     # P3 — a real sleep, or polling against real time
     def p3(self) -> None:
+        promise_calls = self.promise_timer_sleeps()
         for m in re.finditer(
             r"(?<![\w$.])(?:(?:globalThis|window|self|global)\s*\.\s*)?(setTimeout|setInterval)\s*\(", self.b
         ):
+            if m.start() in promise_calls:
+                continue
             open_at = m.end() - 1
             spans = self.args(open_at)
             zero = len(spans) < 2 or self.raw[spans[1][0]:spans[1][1]].strip() == "0"
@@ -1625,8 +1876,7 @@ class TsScan:
             if any(t["open"] < pos < t["close"] for t in in_set_system_time):
                 self.hit(pos, "P4 clock-read")
                 continue
-            faked, pinned = self.faked_state(pos)
-            if not (faked and pinned):
+            if not self.faked_state(pos)[1]:
                 self.hit(pos, "P4 clock-read")
 
     # P5 — unseeded randomness
@@ -1877,7 +2127,7 @@ def scan_package_json(text: str) -> list[Hit]:
     try:
         pkg = json.loads(text)
     except ValueError as err:
-        return [(1, "PARSE", f"package.json does not parse (file not checked): {err}")]
+        return [(1, "P0 parse error", f"package.json does not parse (file not checked): {err}")]
     hits: list[Hit] = []
     for name, command in (pkg.get("scripts") or {}).items():
         at = max(text.find(f'"{name}"'), 0)
@@ -1997,14 +2247,14 @@ def main() -> int:
         try:
             record(path, PythonScan(rel, read(path), "test").run())
         except SyntaxError as err:
-            record(path, [(err.lineno or 1, "PARSE", f"file not checked: {err.msg}")])
+            record(path, [(err.lineno or 1, "P0 parse error", f"file not checked: {err.msg}")])
     for rel, _ in scope["py-gate"]:
         checked += 1
         path = root / rel
         try:
             record(path, PythonScan(rel, read(path), "gate").run())
         except SyntaxError as err:
-            record(path, [(err.lineno or 1, "PARSE", f"file not checked: {err.msg}")])
+            record(path, [(err.lineno or 1, "P0 parse error", f"file not checked: {err.msg}")])
     for kind in ("ts-test", "ts-config"):
         for rel, _ in scope[kind]:
             checked += 1

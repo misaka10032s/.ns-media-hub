@@ -24,14 +24,29 @@
 import { ESLint } from 'eslint'
 import path from 'node:path'
 import vitestPlugin from '@vitest/eslint-plugin'
-import { getChangedFiles, resolveBaseRef } from './lib/git-diff.mjs'
+import { getChangedFiles, getStagedFiles, resolveBaseRef } from './lib/git-diff.mjs'
 
 const cwd = process.cwd()
 const TEST_FILE_RE = /\.(test|spec)\.[cm]?jsx?$/
+const EXTENSIONS = ['js', 'mjs', 'cjs']
+// `--staged` (the commit-time step): only the test files staged for the next commit.
+const stagedMode = process.argv.slice(2).includes('--staged')
 
 async function main() {
-  const baseRef = resolveBaseRef(cwd)
-  const changed = getChangedFiles(cwd, baseRef, ['js', 'mjs', 'cjs']).filter((f) => TEST_FILE_RE.test(f))
+  const baseRef = stagedMode ? 'the index' : resolveBaseRef(cwd)
+  const stagedTests = getStagedFiles(cwd, EXTENSIONS).filter((f) => TEST_FILE_RE.test(f))
+  const changed = stagedMode
+    ? stagedTests
+    : getChangedFiles(cwd, baseRef, EXTENSIONS).filter((f) => TEST_FILE_RE.test(f))
+
+  if (changed.length === 0 && stagedTests.length > 0) {
+    // The staged list holds test files but the diff listed none: the listing is broken, so nothing was checked.
+    console.error(
+      `[G3b] FAIL — 0 changed test files vs ${baseRef} while ${stagedTests.length} test file(s) are staged ` +
+        `(${stagedTests.join(', ')}): the changed-file listing is wrong, nothing was checked.`,
+    )
+    return 1
+  }
 
   if (changed.length === 0) {
     console.log(`[G3b] no new/changed test files vs ${baseRef} — nothing to check.`)

@@ -1,0 +1,5 @@
+import asyncio
+
+
+def test_c():
+    assert asyncio.get_event_loop().time() > 0

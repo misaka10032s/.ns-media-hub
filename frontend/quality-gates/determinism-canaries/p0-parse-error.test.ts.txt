@@ -1,0 +1,4 @@
+import { expect, it } from 'vitest'
+
+it('c', () => {
+  expect(1).toBe(1)

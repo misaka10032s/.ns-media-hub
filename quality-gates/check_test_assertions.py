@@ -23,6 +23,7 @@ from lib.git_diff import (
     ensure_utf8_stdio,
     get_changed_files,
     get_changed_line_ranges,
+    get_staged_files,
     resolve_base_ref,
 )
 
@@ -59,14 +60,27 @@ def _has_assertion(node: ast.AST) -> bool:
 
 def main() -> int:
     cwd = Path.cwd()
-    base_ref = resolve_base_ref(cwd)
-    changed = [f for f in get_changed_files(cwd, base_ref, ["py"]) if _is_test_file(f)]
+    # `--staged` (the commit-time step): only the test files staged for the next commit.
+    staged_mode = "--staged" in sys.argv[1:]
+    base_ref = "the index" if staged_mode else resolve_base_ref(cwd)
+    staged_tests = [f for f in get_staged_files(cwd, ["py"]) if _is_test_file(f)]
+    changed = staged_tests if staged_mode else [
+        f for f in get_changed_files(cwd, base_ref, ["py"]) if _is_test_file(f)
+    ]
 
+    if not changed and staged_tests:
+        # The staged list holds test files but the diff listed none: the listing is broken, so nothing was checked.
+        print(
+            f"[G3b] FAIL — 0 changed test files vs {base_ref} while {len(staged_tests)} test file(s) are staged "
+            f"({', '.join(staged_tests)}): the changed-file listing is wrong, nothing was checked.",
+            file=sys.stderr,
+        )
+        return 1
     if not changed:
         print(f"[G3b] no new/changed test files vs {base_ref} — nothing to check.")
         return 0
 
-    changed_lines = get_changed_line_ranges(cwd, base_ref, changed)
+    changed_lines = get_changed_line_ranges(cwd, base_ref, changed, staged_mode)
     violations: list[tuple[str, int, str]] = []
 
     for rel in changed:

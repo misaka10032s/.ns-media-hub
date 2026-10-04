@@ -1,0 +1,27 @@
+import { expect, it, vi } from 'vitest'
+
+// Every construct below is an exemption the checker names; the checker must report 0 hits here.
+
+it('a clock fixed inside the test by vi.setSystemTime, no fake timers', () => {
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'))
+  expect(Date.now()).toBe(Date.parse('2026-01-15T12:00:00Z'))
+})
+
+it('a clock fixed inside the test next to fake timers', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'))
+  expect(Date.now()).toBe(Date.parse('2026-01-15T12:00:00Z'))
+  vi.useRealTimers()
+})
+
+it('a clock fixed inside the test by fake timers started at a fixed time', () => {
+  vi.useFakeTimers({ now: new Date('2026-01-15T12:00:00Z') })
+  expect(Date.now()).toBe(Date.parse('2026-01-15T12:00:00Z'))
+  vi.useRealTimers()
+})
+
+it('a zero-delay yield through node:timers/promises', async () => {
+  const { setTimeout: yieldNow } = await import('node:timers/promises')
+  await yieldNow(0)
+  expect(1).toBe(1)
+})

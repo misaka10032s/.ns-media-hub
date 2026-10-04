@@ -6,8 +6,12 @@
  * target resolves inside the repo and not under `os.tmpdir()`, it throws instead of writing.
  * The runner's own outputs (`coverage/`, `node_modules/.vite*`, `node_modules/.vitest*`) are allowed.
  *
- * The wrappers are installed on the CommonJS `fs` object and then `syncBuiltinESMExports()` copies
- * them to the named ESM exports, so `import { writeFileSync } from 'node:fs'` is guarded too.
+ * The wrappers are installed on the CommonJS `fs` object and on `fs.promises`, and then `syncBuiltinESMExports()`
+ * copies them to the named ESM exports of `node:fs` and `node:fs/promises`, so `import { writeFileSync } from
+ * 'node:fs'` and `import { open } from 'node:fs/promises'`, bound before or after this file ran, are guarded too.
+ * `open` (callback, sync and promise forms) is checked by its flags: a write flag (`w`, `a`, `r+`, `wx`, `ax`, or numeric
+ * `O_WRONLY` / `O_RDWR` / `O_CREAT` / `O_APPEND` / `O_TRUNC`) on a repo path throws, so a `FileHandle` that can write
+ * (`write`, `writeFile`, `appendFile`, `truncate`) can only come from an allowed path. Reads are never touched.
  */
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -116,7 +120,7 @@ const opensForWrite = (flags: unknown): boolean => {
         return /[wa+]/.test(flags);
     }
     if (typeof flags === 'number') {
-        const writing = fs.constants.O_WRONLY | fs.constants.O_RDWR | fs.constants.O_CREAT;
+        const writing = fs.constants.O_WRONLY | fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_TRUNC;
         return (flags & writing) !== 0;
     }
     return false;
@@ -169,6 +173,8 @@ const install = (): void => {
     }
     guard(callbackFs, 'open', [0], true);
     guard(callbackFs, 'openSync', [0], true);
+    guard(promisesFs, 'open', [0], true);
+    // After every patch above: copy the guarded functions to the named ESM exports of node:fs and node:fs/promises.
     syncBuiltinESMExports();
 };
 
