@@ -46,7 +46,7 @@ const HELPER_RE = /\.testUtils\.[cm]?[jt]sx?$/
 const CONFIG_RE = /^(?:vite|vitest|playwright)\.config\.[cm]?[jt]s$|^vitest\.workspace\.[cm]?[jt]s$/
 // Skip list: dependency and tool folders only. A folder named build, env, bin or dist never drops a test file,
 // and coverage output is skipped only outside a test tree (a test folder, or a file named like a test).
-const DEPENDENCY_SEGMENTS = new Set(['node_modules', '.venv', 'venv', '.git', '.stryker-tmp', '__pycache__', 'site-packages', '.tox', 'obj', 'target'])
+const DEPENDENCY_SEGMENTS = new Set(['node_modules', '.venv', '.claude', 'venv', '.git', '.stryker-tmp', '__pycache__', 'site-packages', '.tox', 'obj', 'target'])
 const COVERAGE_SEGMENTS = new Set(['coverage'])
 const TEST_FOLDERS = new Set(['tests', 'test', '.test', '__tests__'])
 const ALL_RULES = Object.fromEntries(Object.keys(plugin.rules).map((r) => [`determinism/${r}`, 'error']))

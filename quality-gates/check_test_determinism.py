@@ -52,7 +52,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # Skip list: dependency and tool folders only. A folder named build, env, bin or dist never drops a test file,
 # and coverage output is skipped only outside a test tree (a test folder, or a file named like a test).
-DEPENDENCY_DIRS = {".git", "node_modules", ".venv", "venv", ".stryker-tmp", "__pycache__", "site-packages", ".tox", "obj", "target"}
+DEPENDENCY_DIRS = {".git", "node_modules", ".venv", ".claude", "venv", ".stryker-tmp", "__pycache__", "site-packages", ".tox", "obj", "target"}
 COVERAGE_DIRS = {"coverage", "htmlcov"}
 TEST_FOLDER_NAMES = {"tests", "test", ".test", "__tests__"}
 TEST_FILE_NAME = re.compile(r"^test_|_test\.py$|\.(?:test|spec)\.[cm]?[jt]sx?$|Tests?\.(?:cs|java)$")

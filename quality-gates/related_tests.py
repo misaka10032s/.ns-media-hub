@@ -9,6 +9,10 @@ wherever in the file they stand. A staged module is named by its dotted path fro
 (`app/services/updater_service.py` is `app.services.updater_service`, `app/services/__init__.py` is `app.services`
 and also covers every `app.services.*` import) and, when its folder has no `__init__.py`, by its bare file name (`dl.py` is `dl`).
 
+A staged `conftest.py` is related to every test file under its folder. A test file that holds a staged module's
+dotted path as a string (`import_module("a.b")`) or a staged file's repo-relative path (with `/` or a backslash, as
+in `spec_from_file_location`) is related, the same as an import.
+
 Usage (from the repo root):  py -3.11 quality-gates/related_tests.py   (prints the files, one per line)
 """
 from __future__ import annotations
@@ -22,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.git_diff import ensure_utf8_stdio, get_staged_files
 
+BACKSLASH = chr(92)
 ROOT = Path(__file__).resolve().parent.parent  # repo root
 
 
@@ -72,19 +77,57 @@ def imported_names(path: Path) -> set[str]:
     return names
 
 
+def dotted_module_name(rel: str) -> str | None:
+    """The dotted path a string can load a module by (`a/b/c.py` is `a.b.c`, `a/b/__init__.py` is `a.b`), or None."""
+    parts = rel[: -len(".py")].split("/")
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    if parts and all(part.isidentifier() for part in parts):
+        return ".".join(parts)
+    return None
+
+
+def loaded_by_string(path: Path, dotted: set[str], dotted_packages: set[str], file_paths: set[str]) -> bool:
+    """True when the file holds a staged module's dotted path as a string literal (`import_module("a.b")`), or a
+    staged file's repo-relative path anywhere in its text (`spec_from_file_location(..., "a/b.py")`)."""
+    text = path.read_text(encoding="utf-8")
+    if any(file_path in text for file_path in file_paths):
+        return True
+    for node in ast.walk(ast.parse(text, filename=str(path))):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            value = node.value
+            if value in dotted or any(value.startswith(package + ".") for package in dotted_packages):
+                return True
+    return False
+
+
 def related_test_files(root: Path = ROOT) -> list[str]:
-    """Staged test files plus the test files that import a staged module, relative to `root`, sorted."""
+    """Staged test files, test files that import or load by string a staged module and test files under a staged
+    conftest.py's folder, relative to `root`, sorted."""
     staged = get_staged_files(root, ["py"])
     tests = all_test_files(root)
     related = {rel for rel in staged if rel in tests}
+    for rel in staged:
+        if rel.rsplit("/", 1)[-1] == "conftest.py":
+            folder = rel[: -len("conftest.py")]  # "" for a conftest at the repo root
+            related.update(test for test in tests if test.startswith(folder))
     exact: set[str] = set()
     packages: set[str] = set()
+    dotted: set[str] = set()  # the dotted paths a string can load a staged module by
+    dotted_packages: set[str] = set()
+    file_paths: set[str] = set()  # the staged files' repo-relative paths, with / and with a backslash
     for rel in staged:
         names, is_package = module_names(root, rel)
         exact |= names
         if is_package:
             packages |= names
-    if exact:
+        dotted_name = dotted_module_name(rel)
+        if dotted_name:
+            dotted.add(dotted_name)
+            if is_package:
+                dotted_packages.add(dotted_name)
+        file_paths |= {rel, rel.replace("/", BACKSLASH), rel.replace("/", BACKSLASH * 2)}
+    if exact or file_paths:
         for rel in tests:
             if rel in related:
                 continue
@@ -92,6 +135,9 @@ def related_test_files(root: Path = ROOT) -> list[str]:
                 if name in exact or any(name.startswith(package + ".") for package in packages):
                     related.add(rel)
                     break
+            else:
+                if loaded_by_string(root / rel, dotted, dotted_packages, file_paths):
+                    related.add(rel)
     return sorted(related)
 
 
