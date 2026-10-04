@@ -32,6 +32,19 @@ function fileExistsAtRef(file, baseRef, prefix) {
   }
 }
 
+// Staged mode: the package-relative paths the commit adds (status A). Such a file is not in HEAD, so it is not looked up there.
+function stagedAddedFiles() {
+  const prefix = repoPrefix(cwd)
+  const out = git(['diff', '--cached', '--name-only', '--diff-filter=A'], cwd)
+  return new Set(
+    out
+      .split('\n')
+      .map((s) => s.trim().replace(/\\/g, '/'))
+      .filter(Boolean)
+      .map((p) => (prefix !== '' && p.startsWith(prefix) ? p.slice(prefix.length) : p)),
+  )
+}
+
 async function main() {
   const baseRef = staged ? 'HEAD' : resolveBaseRef(cwd)
   const extensions = ['vue', 'js', 'mjs', 'cjs']
@@ -44,6 +57,7 @@ async function main() {
 
   const prefix = repoPrefix(cwd)
   const changedLines = getChangedLineRanges(cwd, baseRef, changed, staged)
+  const addedFiles = staged ? stagedAddedFiles() : new Set()
   const eslint = new ESLint({ cwd }) // uses this repo's own eslint.config.js
   const absFiles = changed.map((f) => path.resolve(cwd, f))
   const results = await eslint.lintFiles(absFiles)
@@ -52,7 +66,7 @@ async function main() {
   let warningCount = 0
   for (const result of results) {
     const relFile = path.relative(cwd, result.filePath).replace(/\\/g, '/')
-    const isNewFile = !fileExistsAtRef(relFile, baseRef, prefix)
+    const isNewFile = addedFiles.has(relFile) || !fileExistsAtRef(relFile, baseRef, prefix)
     const lineSet = changedLines.get(relFile) ?? new Set()
 
     for (const msg of result.messages) {

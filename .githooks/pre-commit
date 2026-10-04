@@ -1,8 +1,10 @@
 #!/bin/sh
-# Pre-commit gate — runs the COMMIT-level step of every stack (frontend/, Python) that has staged changes.
-# Commit = staged-file lint + determinism + related tests, within 10 seconds; end of the task (before merge) = the
-# task's one full run (frontend `npm run gate:l1`, Python `py -3.11 quality-gates/run.py l1`). Every touched stack is
-# evaluated before the hook decides pass/fail — a failure in one stack does NOT skip checking the other (see the
+# Pre-commit gate — runs the COMMIT-level step of every stack (frontend/, Python) that has staged changes. Commit = per
+# stack only the steps the staged files' change class needs (frontend `quality-gates/commit.mjs`, Python `run.py commit`):
+# lint, determinism of the staged test, setup and gate files, the assertion check, and no test run, within 10 seconds.
+# The touched stacks run at the same time, so a commit takes about the slowest one, not the sum. End of the task (before
+# merge) = the task's one full run (frontend `npm run gate:l1`, Python `py -3.11 quality-gates/run.py l1`). Every touched
+# stack is evaluated before the hook decides pass/fail — a failure in one stack does NOT skip checking the other (see the
 # "checked: | skipped:" summary line at the end). Adapted from misaka_site2.0's .githooks/pre-commit (verified recipe),
 # for a Vue/JS + Python hybrid.
 # Enable once per clone/machine:
@@ -29,35 +31,61 @@ staged_matches() {
   git diff --cached --name-only --diff-filter=ACMRD -- "$@" '*requirements*.txt' '*quality-gates/*' '*determinism-canaries/*' '.githooks/pre-commit' | grep -q .
 }
 
-# --- frontend/ (commit level: lint of the staged files, determinism scan, assertion check, related tests) ---
-if staged_matches 'frontend/*'; then
+# Each fired stack runs in the background with its output in its own log and its exit code in its own .rc file; one
+# `wait` ends them all, then the logs are printed in the stack order (frontend, Python), so the output is not mixed.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+blocks=""
+
+start_block() {
+  name=$1
+  shift
+  ( rc=0; "$@" > "$tmp/$name.log" 2>&1 || rc=$?; echo "$rc" > "$tmp/$name.rc" ) &
+  blocks="$blocks $name"
+}
+
+# --- frontend/ (commit level: quality-gates/commit.mjs classes the staged files and runs lint, determinism of the staged test/setup/gate files, the assertion check) ---
+frontend_block() {
   echo "[pre-commit] frontend/ changes staged — running gate:commit..."
   cd "$repo_root/frontend"
   if ! npm run gate:commit; then
     echo "[pre-commit] frontend gate:commit FAILED."
-    failed=1
-  else
-    echo "[pre-commit] frontend gate:commit PASSED."
+    return 1
   fi
-  cd "$repo_root"
+  echo "[pre-commit] frontend gate:commit PASSED."
+}
+if staged_matches 'frontend/*'; then
+  start_block frontend frontend_block
   checked="$checked frontend"
 else
   skipped="$skipped frontend"
 fi
 
-# --- Python (commit level: ruff on the staged files, determinism scan, assertion check, related tests) ---
-if staged_matches 'app/*.py' 'module/*.py' 'scripts/*.py' 'tests/*.py' 'pyproject.toml' 'pytest.ini' '*conftest.py'; then
+# --- Python (commit level: run.py commit classes the staged files and runs ruff on the staged files, determinism of the staged test/setup/gate files, the assertion check) ---
+python_block() {
   echo "[pre-commit] Python changes staged — running quality-gates/run.py commit..."
   if ! py -3.11 quality-gates/run.py commit; then
     echo "[pre-commit] Python gate commit FAILED."
-    failed=1
-  else
-    echo "[pre-commit] Python gate commit PASSED."
+    return 1
   fi
+  echo "[pre-commit] Python gate commit PASSED."
+}
+if staged_matches 'app/*.py' 'module/*.py' 'scripts/*.py' 'tests/*.py' 'pyproject.toml' 'pytest.ini' '*conftest.py'; then
+  start_block python python_block
   checked="$checked python"
 else
   skipped="$skipped python"
 fi
+
+wait
+for name in $blocks; do
+  cat "$tmp/$name.log"
+  rc=$(cat "$tmp/$name.rc" 2>/dev/null || echo 1)
+  if [ "$rc" != "0" ]; then
+    failed=1
+  fi
+done
+rm -rf "$tmp"
 
 echo "[pre-commit] checked:${checked:- none} | skipped:${skipped:- none}"
 

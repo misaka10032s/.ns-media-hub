@@ -16,7 +16,7 @@
     "gate:g3": "npm run gate:g3:test && npm run gate:g3:assertions && npm run gate:g3:determinism",
     "gate:g4": "node quality-gates/check-import-cycles.mjs",
     "gate:g4:update-baseline": "node quality-gates/check-import-cycles.mjs --update-baseline",
-    "gate:commit": "node quality-gates/check-lint-diff.mjs --staged && node quality-gates/check-test-determinism.mjs && node quality-gates/check-test-assertions.mjs --staged && node quality-gates/run-related-tests.mjs",
+    "gate:commit": "node quality-gates/commit.mjs",
     "gate:l0": "npm run gate:g1 && npm run gate:g3 && npm run gate:g4",
     "gate:l1": "npm run gate:l0"
   },

@@ -8,13 +8,14 @@ The patterns (one tag each in the output):
   P8 any skip, and a silent early return                            P9 a write to a real repo path
 (P7, the real-router pattern, exists only for the TypeScript stack.)
 
-Whole scope on every run, never diff-scoped, and no way to switch a hit off: no baseline file, no
-allow-list file, no ignore comment, no environment variable, no flag that skips a rule. The only
-options pick WHAT to scan (`--stack`, `--root`). The only exemptions are the coded constructs each
-rule names. A file that does not parse counts as a hit (`P0 parse error`, file:line of the error), because it
-was not checked, and the run exits non-zero. Python files are parsed with `ast`; the token stacks (cs, java, ts)
-have no parser here, so their parse check is the bracket nesting of the source with comments, strings and
-regex literals blanked out.
+The whole scope in the end-of-task run (no option); at commit only the given files (`--files`, the staged test,
+setup and gate files), scanned by the same rules and the same scope rules, so a file outside the scope stays out of it.
+No way to switch a hit off: no baseline file, no allow-list file, no ignore comment, no environment variable, no flag
+that skips a rule. The only options pick WHAT to scan (`--stack`, `--root`, `--files`). The only exemptions are the
+coded constructs each rule names. A file that does not parse counts as a hit (`P0 parse error`, file:line of the
+error), because it was not checked, and the run exits non-zero. Python files are parsed with `ast`; the token
+stacks (cs, java, ts) have no parser here, so their parse check is the bracket nesting of the source with comments,
+strings and regex literals blanked out.
 
 Stacks:
   py    (default) Python tests, scope = what pytest collects (testpaths / python_files from the
@@ -31,7 +32,9 @@ Stacks:
         scripts and the git hook. The same nine patterns (P1-P9) as the .mjs checker, as token
         rules over the source with comments, strings and template literals blanked out.
 
-Usage (from the package folder):  py -3.11 quality-gates/check_test_determinism.py [--stack py|cs|java|ts] [--root DIR]
+Usage (from the package folder):
+  py -3.11 quality-gates/check_test_determinism.py [--stack py|cs|java|ts] [--root DIR] [--files PATH ...]
+  --files: paths relative to --root; only these are scanned (the git hook only when it is one of them).
 """
 from __future__ import annotations
 
@@ -2226,9 +2229,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="G3(c) determinism check (no option switches a hit off).")
     parser.add_argument("--stack", choices=("py", "cs", "java", "ts"), default="py", help="which stack's tests to scan")
     parser.add_argument("--root", default=".", help="package folder to scan (default: current folder)")
+    parser.add_argument(
+        "--files",
+        nargs="*",
+        default=None,
+        metavar="PATH",
+        help="scan only these files (paths relative to --root); default: the whole scope",
+    )
     args = parser.parse_args()
     root = (Path.cwd() / args.root).resolve()
     scope = collect(root, args.stack)
+    given_abs: set[Path] = set()
+    if args.files is not None:
+        given_abs = {(root / given).resolve() for given in args.files}
+        given_rel: set[str] = set()
+        for path in given_abs:
+            try:
+                given_rel.add(path.relative_to(root).as_posix())
+            except ValueError:  # outside --root: only the git hook can match it
+                continue
+        scope = {kind: [(rel, how) for rel, how in entries if rel in given_rel] for kind, entries in scope.items()}
 
     results: list[tuple[str, int, str, str]] = []
     checked = 0
@@ -2279,14 +2299,14 @@ def main() -> int:
     shell_paths = [root / rel for rel, _ in scope["shell"]]
     top = run_git(root, "rev-parse", "--show-toplevel").strip()
     hook = Path(top) / ".githooks" / "pre-commit"
-    if hook.is_file():
+    if hook.is_file() and (args.files is None or hook.resolve() in given_abs):
         shell_paths.append(hook)
     for path in shell_paths:
         checked += 1
         record(path, scan_shell(path))
 
     # The git hook sits at the repo top, outside the scan root's own scope, so it does not count here.
-    if sum(len(v) for v in scope.values()) == 0:
+    if args.files is None and sum(len(v) for v in scope.values()) == 0:
         print(
             f"[G3c] FAIL — 0 files in scope under {root} (--stack {args.stack}): "
             "nothing was checked, so this run proves nothing.",
@@ -2307,6 +2327,9 @@ def main() -> int:
     if final:
         print(f"\n[G3c] FAIL — {len(final)} hit(s) in {checked} file(s) checked.", file=sys.stderr)
         return 1
+    if args.files is not None and checked == 0:
+        print(f"[G3c] PASS — no given file is in scope ({len(args.files)} given)")
+        return 0
     print(f"[G3c] PASS — {checked} file(s) checked, 0 hits.")
     return 0
 

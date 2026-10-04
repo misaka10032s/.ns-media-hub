@@ -9,16 +9,18 @@
 //   P7 a real router that lazy-loads pages   P8 any skip, and a silent early return
 //   P9 a write to a real repo path
 //
-// Whole scope on every run (not diff-scoped, unlike G3(b)): it reads no base ref, so a wrong base
-// cannot make it vacuous, and a pattern cannot re-enter through a rename or an edit outside the diff.
+// The whole scope in the end-of-task run (no option); at commit only the given files (--files, the staged
+// test, setup and gate files), scanned by the same rules and the same scope rules, so a file outside the
+// scope stays out of it. It reads no base ref, so a wrong base cannot make it vacuous.
 //
 // There is NO way to switch a hit off: no baseline file, no allow-list file, no ignore comment (ESLint
 // runs with allowInlineConfig: false), no environment variable, no flag that skips a rule. The only
-// flag is --root, which picks the package folder to scan. The only exemptions are the coded constructs
-// each rule names. A file that does not parse counts as a hit (`P0 parse error`, file:line of the error), because
+// flags pick WHAT to scan: --root, the package folder, and --files, the files inside it. The only
+// exemptions are the coded constructs each rule names. A file that does not parse counts as a hit (`P0 parse error`, file:line of the error), because
 // it was not checked (the same rule G3(b) follows), and the run exits non-zero.
 //
-// Usage: node quality-gates/check-test-determinism.mjs [--root <package folder>]   (default: cwd)
+// Usage: node quality-gates/check-test-determinism.mjs [--root <package folder>] [--files <path> ...]   (root default: cwd)
+//   --files: paths relative to --root; only these are scanned (the git hook only when it is one of them).
 import { ESLint } from 'eslint'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -54,13 +56,17 @@ const TEST_COMMAND = /\b(?:npm\s+(?:run\s+)?(?:test|gate[\w:.-]*)|npx\s+vitest|v
 
 function parseArgs(argv) {
   let root = '.'
+  let files = null
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--root' && i + 1 < argv.length) root = argv[++i]
     else if (a.startsWith('--root=')) root = a.slice('--root='.length)
-    else throw new Error(`unknown argument "${a}" (the only option is --root <package folder>)`)
+    else if (a === '--files') {
+      files = files ?? []
+      while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) files.push(argv[++i])
+    } else throw new Error(`unknown argument "${a}" (the options are --root <package folder> and --files <path> ...)`)
   }
-  return path.resolve(process.cwd(), root)
+  return { root: path.resolve(process.cwd(), root), files }
 }
 
 // Every git call runs with -C <scan root> and without GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE: a commit
@@ -227,8 +233,10 @@ function toPosix(p) {
 }
 
 async function main() {
-  const root = parseArgs(process.argv.slice(2))
-  const files = listFiles(root)
+  const { root, files: given } = parseArgs(process.argv.slice(2))
+  // --files: the given paths resolved against the scan root, compared as absolute paths (case folded on Windows).
+  const givenAbs = given === null ? null : new Set(given.map((p) => fold(path.resolve(root, p))))
+  const files = listFiles(root).filter((rel) => givenAbs === null || givenAbs.has(fold(path.resolve(root, rel))))
   const groups = { test: [], config: [], gate: [], package: [], shell: [] }
   for (const rel of files) {
     const kind = classify(rel)
@@ -265,7 +273,7 @@ async function main() {
   const shellFiles = groups.shell.map((rel) => path.resolve(root, rel))
   const top = git(root, ['rev-parse', '--show-toplevel']).trim()
   const hook = path.join(top, '.githooks', 'pre-commit')
-  if (fs.existsSync(hook)) shellFiles.push(hook)
+  if (fs.existsSync(hook) && (givenAbs === null || givenAbs.has(fold(path.resolve(hook))))) shellFiles.push(hook)
   for (const abs of shellFiles) {
     checked++
     for (const h of scanShell(abs)) addHit(abs, h.line, h.tag, h.text)
@@ -278,13 +286,17 @@ async function main() {
 
   // The git hook sits at the repo top, outside the scan root's own scope, so it does not count here.
   const inScope = Object.values(groups).reduce((sum, list) => sum + list.length, 0)
-  if (inScope === 0) {
+  if (inScope === 0 && given === null) {
     console.error(`[G3c] FAIL — 0 files in scope under ${root}: nothing was checked, so this run proves nothing.`)
     return 1
   }
   if (unique.length > 0) {
     console.error(`\n[G3c] FAIL — ${unique.length} hit(s) in ${checked} file(s) checked.`)
     return 1
+  }
+  if (given !== null && checked === 0) {
+    console.log(`[G3c] PASS — no given file is in scope (${given.length} given)`)
+    return 0
   }
   console.log(`[G3c] PASS — ${checked} file(s) checked, 0 hits.`)
   return 0
