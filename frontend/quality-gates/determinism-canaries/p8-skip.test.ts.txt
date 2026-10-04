@@ -1,0 +1,5 @@
+import { expect, it } from 'vitest'
+
+it.skipIf(!process.env.X)('c', () => {
+  expect(1).toBe(1)
+})

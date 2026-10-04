@@ -1,0 +1,14 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { expect, it } from 'vitest'
+
+// Runtime-guard canary: copy next to a test file. With src/test-utils/noRepoWrites.ts on (vitest setupFiles) the test
+// passes: the guard throws before anything is created. With the guard off it fails and c.txt exists: delete it.
+const target = path.resolve(process.cwd(), 'c.txt')
+
+// A FileHandle can write only if it was opened with a write flag; opening the repo file for update is refused,
+// so there is no handle to write through.
+it('c: FileHandle write on a repo file', () => {
+  expect(() => fs.promises.open(target, 'r+')).toThrow(/noRepoWrites/)
+  expect(fs.existsSync(target)).toBe(false)
+})

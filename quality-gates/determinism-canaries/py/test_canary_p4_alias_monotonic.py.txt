@@ -1,0 +1,5 @@
+from time import monotonic as tick
+
+
+def test_c():
+    assert tick() > 0

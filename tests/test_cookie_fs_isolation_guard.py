@@ -55,15 +55,30 @@ class TestLandsInTmpPathWithoutAnyOptInFixture:
         assert _REAL_COOKIE_DIR.resolve() not in saved_path.parents
         assert saved_path.exists()
 
-    def test_delete_cookie_never_unlinks_a_file_under_the_real_cookie_dir(self):
+    def test_delete_cookie_never_unlinks_a_file_under_the_real_cookie_dir(self, monkeypatch):
         # Exercises the EXACT route review-3.md flagged: save then delete,
         # both via scan_cookie_files() (registry), with zero opt-in fixture.
-        # NB: _REAL_COOKIE_DIR is TREE-relative (review-3.md NB3) — in THIS
-        # worktree it is the worktree's own (gitignored, near-empty)
-        # cookies/, never the main tree's real jar; the check below is
-        # written generically (a before/after NAME snapshot, never a
-        # hardcoded main-tree file list) so it is correct in either tree.
-        before_names = {p.name for p in _REAL_COOKIE_DIR.glob("*.txt")} if _REAL_COOKIE_DIR.exists() else set()
+        # The save write (cookie_service._atomic_write_text) and the delete
+        # (Path.unlink) are wrapped with recorders that delegate; every
+        # recorded target is checked against the real jar. Nothing reads the
+        # real jar's listing, so a running app or the owner cannot change
+        # the outcome.
+        recorded_targets: list[Path] = []
+
+        real_atomic_write_text = cookie_service._atomic_write_text
+
+        def _recording_atomic_write_text(path, *args, **kwargs):
+            recorded_targets.append(Path(path))
+            return real_atomic_write_text(path, *args, **kwargs)
+
+        real_path_unlink = Path.unlink
+
+        def _recording_unlink(self, *args, **kwargs):
+            recorded_targets.append(Path(self))
+            return real_path_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(cookie_service, "_atomic_write_text", _recording_atomic_write_text)
+        monkeypatch.setattr(Path, "unlink", _recording_unlink)
 
         record = cookie_service.save_cookie("probe-fs-guard-2.example", "Cookie: a=1")
         saved_path = Path(record["file_path"])
@@ -73,10 +88,12 @@ class TestLandsInTmpPathWithoutAnyOptInFixture:
 
         assert deleted >= 1
         assert not saved_path.exists()
-        # And, separately, the real jar's own contents are untouched by this
-        # test — checked by file NAME only (never content), before vs after.
-        after_names = {p.name for p in _REAL_COOKIE_DIR.glob("*.txt")} if _REAL_COOKIE_DIR.exists() else set()
-        assert after_names == before_names
+        resolved_targets = [target.resolve() for target in recorded_targets]
+        assert saved_path.resolve() in resolved_targets
+        real_jar = _REAL_COOKIE_DIR.resolve()
+        for target in resolved_targets:
+            assert target != real_jar
+            assert real_jar not in target.parents
 
     def test_scan_cookie_files_never_migrates_the_real_legacy_dirs(self):
         # migrate_legacy_cookie_files() is a no-op today because the real

@@ -1,0 +1,14 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.setSystemTime(Date.now())
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+it('c', () => {
+  expect(1).toBe(1)
+})

@@ -1,0 +1,27 @@
+import asyncio
+from datetime import datetime, timezone
+
+import numpy as np
+import time_machine
+
+# Every construct below is an exemption the checker names; the checker must report 0 hits here.
+
+
+@time_machine.travel(datetime(2026, 1, 15, tzinfo=timezone.utc), tick=False)
+def test_frozen_clock():
+    assert datetime.now(timezone.utc).year == 2026
+
+
+def test_zero_sleep():
+    asyncio.run(asyncio.sleep(0))
+    assert True
+
+
+class Client:
+    def get(self, url, timeout=15):
+        return url
+
+
+def test_seeded_generator():
+    rng = np.random.default_rng(7)
+    assert 0 <= rng.random() < 1

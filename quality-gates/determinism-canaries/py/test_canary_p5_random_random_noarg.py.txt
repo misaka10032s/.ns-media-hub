@@ -1,0 +1,6 @@
+import random
+
+
+def test_c():
+    rng = random.Random()
+    assert rng.random() >= 0

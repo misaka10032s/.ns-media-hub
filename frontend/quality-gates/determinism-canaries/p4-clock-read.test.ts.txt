@@ -1,0 +1,5 @@
+import { expect, it } from 'vitest'
+
+it('c', () => {
+  expect(Date.now()).toBeGreaterThan(0)
+})

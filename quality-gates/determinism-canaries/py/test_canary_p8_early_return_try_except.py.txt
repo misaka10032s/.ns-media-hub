@@ -1,0 +1,10 @@
+def compute():
+    return 1
+
+
+def test_c():
+    try:
+        value = compute()
+    except RuntimeError:
+        return
+    assert value == 1

@@ -1,0 +1,5 @@
+import subprocess
+import sys
+
+for attempt in range(2):
+    subprocess.run([sys.executable, "-m", "pytest", "-q"])

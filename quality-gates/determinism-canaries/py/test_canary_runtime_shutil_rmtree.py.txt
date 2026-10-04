@@ -1,0 +1,14 @@
+import os
+
+# Runtime-guard canary: copy into backend/api/v0/.test/. With backend/conftest.py's guard on, the test fails with
+# RepoWriteBlocked before anything changes, and the session ends with "tests wrote under the repo root:". With the
+# guard off it changes the repo: undo it.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
+TARGET = os.path.join(REPO_ROOT, "canary-c.txt")
+
+
+import shutil
+
+
+def test_c():
+    shutil.rmtree(TARGET)

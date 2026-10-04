@@ -10,8 +10,22 @@
 // manual L0/L1 run actually want. Override with QUALITY_BASE_REF for a narrower comparison.
 import { execFileSync } from 'node:child_process'
 
-function git(args, cwd) {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 })
+// A commit hook inherits GIT_DIR (and, for a partial commit, GIT_INDEX_FILE) from git: a child `git` that sees them
+// lists the wrong folder's files and returns an empty diff, which every diff-scoped gate reads as "nothing changed".
+// So every call strips every GIT_* variable and names its folder with `-C <cwd>`: no gate script that lists changed
+// or staged files depends on the process folder or on GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE.
+export function git(args, cwd) {
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_')) delete env[key]
+  }
+  return execFileSync('git', ['-C', cwd, ...args], {
+    cwd,
+    encoding: 'utf-8',
+    maxBuffer: 64 * 1024 * 1024,
+    env,
+    windowsHide: true,
+  })
 }
 
 /** Resolve the base ref to diff against. */
@@ -63,14 +77,32 @@ export function getChangedFiles(cwd, baseRef, extensions) {
 }
 
 /**
+ * List the files staged for the next commit (added/copied/modified/renamed — never deleted) under `cwd`, filtered
+ * to the given extensions, returned as paths relative to `cwd`.
+ */
+export function getStagedFiles(cwd, extensions) {
+  const prefix = repoPrefix(cwd)
+  const patterns = extensions.map((e) => `*.${e}`)
+  const out = git(['diff', '--cached', '--name-only', '--diff-filter=ACMR', '--', ...patterns], cwd)
+  return out
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((p) => p.replace(/\\/g, '/'))
+    .map((p) => stripPrefix(p, prefix))
+}
+
+/**
  * Map<relPath, Set<lineNumber>> of lines added/changed on the "new" side for the given files.
  * Pure deletions contribute no lines (nothing new to require lint/assertions for).
+ * With `staged` the lines are those of the index against HEAD (what the next commit adds); `baseRef` is then unused.
  */
-export function getChangedLineRanges(cwd, baseRef, files) {
+export function getChangedLineRanges(cwd, baseRef, files, staged = false) {
   const result = new Map()
   if (files.length === 0) return result
   const prefix = repoPrefix(cwd)
-  const diffOut = git(['diff', '--unified=0', '--diff-filter=ACMR', baseRef, '--', ...files], cwd)
+  const against = staged ? ['--cached'] : [baseRef]
+  const diffOut = git(['diff', '--unified=0', '--diff-filter=ACMR', ...against, '--', ...files], cwd)
   let currentFile = null
   for (const line of diffOut.split('\n')) {
     if (line.startsWith('+++ ')) {

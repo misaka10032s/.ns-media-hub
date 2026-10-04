@@ -17,23 +17,38 @@
 // doesn't apply here).
 import { ESLint } from 'eslint'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
-import { getChangedFiles, getChangedLineRanges, resolveBaseRef, repoPrefix } from './lib/git-diff.mjs'
+import { getChangedFiles, getChangedLineRanges, getStagedFiles, git, resolveBaseRef, repoPrefix } from './lib/git-diff.mjs'
 
 const cwd = process.cwd()
+// `--staged` (the commit-time step): only the files staged for the next commit, only their lines the commit adds.
+const staged = process.argv.slice(2).includes('--staged')
 
 function fileExistsAtRef(file, baseRef, prefix) {
   try {
-    execFileSync('git', ['cat-file', '-e', `${baseRef}:${prefix}${file}`], { cwd, stdio: 'ignore' })
+    git(['cat-file', '-e', `${baseRef}:${prefix}${file}`], cwd)
     return true
   } catch {
     return false
   }
 }
 
+// Staged mode: the package-relative paths the commit adds (status A). Such a file is not in HEAD, so it is not looked up there.
+function stagedAddedFiles() {
+  const prefix = repoPrefix(cwd)
+  const out = git(['diff', '--cached', '--name-only', '--diff-filter=A'], cwd)
+  return new Set(
+    out
+      .split('\n')
+      .map((s) => s.trim().replace(/\\/g, '/'))
+      .filter(Boolean)
+      .map((p) => (prefix !== '' && p.startsWith(prefix) ? p.slice(prefix.length) : p)),
+  )
+}
+
 async function main() {
-  const baseRef = resolveBaseRef(cwd)
-  const changed = getChangedFiles(cwd, baseRef, ['vue', 'js', 'mjs', 'cjs'])
+  const baseRef = staged ? 'HEAD' : resolveBaseRef(cwd)
+  const extensions = ['vue', 'js', 'mjs', 'cjs']
+  const changed = staged ? getStagedFiles(cwd, extensions) : getChangedFiles(cwd, baseRef, extensions)
 
   if (changed.length === 0) {
     console.log(`[G1] no new/changed lintable files vs ${baseRef} — nothing to check.`)
@@ -41,7 +56,8 @@ async function main() {
   }
 
   const prefix = repoPrefix(cwd)
-  const changedLines = getChangedLineRanges(cwd, baseRef, changed)
+  const changedLines = getChangedLineRanges(cwd, baseRef, changed, staged)
+  const addedFiles = staged ? stagedAddedFiles() : new Set()
   const eslint = new ESLint({ cwd }) // uses this repo's own eslint.config.js
   const absFiles = changed.map((f) => path.resolve(cwd, f))
   const results = await eslint.lintFiles(absFiles)
@@ -50,7 +66,7 @@ async function main() {
   let warningCount = 0
   for (const result of results) {
     const relFile = path.relative(cwd, result.filePath).replace(/\\/g, '/')
-    const isNewFile = !fileExistsAtRef(relFile, baseRef, prefix)
+    const isNewFile = addedFiles.has(relFile) || !fileExistsAtRef(relFile, baseRef, prefix)
     const lineSet = changedLines.get(relFile) ?? new Set()
 
     for (const msg of result.messages) {

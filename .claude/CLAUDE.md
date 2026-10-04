@@ -52,14 +52,14 @@ Use `py -3.11` (this repo's exception to the global Python order, for the reason
 ```bash
 py -3.11 -m ruff check app module tests          # G1 (bare, unbaselined view)
 py -3.11 -m mypy app --ignore-missing-imports     # G2 (bare, unbaselined view)
-py -3.11 -m pytest -q                             # G3 — 34 test files, 500 tests, ~18s
+py -3.11 -m pytest -q                             # G3 — 35 test files, 513 tests, ~25s
 ```
 
 ### Frontend — lint / test
 ```bash
 cd frontend
 npm run lint    # eslint . (repo-wide, will show the pre-existing 539-warning backlog — G1 lint itself is diff-scoped, see below)
-npm run test    # vitest run (JobsView.spec.js, HistoryView.spec.js; a zero-test-file result FAILS the gate — see G3 tests below)
+npm run test    # vitest run (JobsView.spec.js, HistoryView.spec.js, repoWriteGuard.test.js; a zero-test-file result FAILS the gate — see G3 tests below)
 ```
 
 ## Code quality gates
@@ -75,18 +75,20 @@ Every gate below is proven able to fail (`D:/backup/CSIA/@PM/.claude/context/clu
 
 Proof-of-failure evidence for both stacks' scoping: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` heading "Scan-scoping proof".
 
-### Python — `py -3.11 quality-gates/run.py <g1|g2|g3|g4|g5|l0|l1> [--update-baseline]`
+### Python — `py -3.11 quality-gates/run.py <g1|g2|g3|g4|g5|commit|l0|l1> [--update-baseline]`
 
 | Gate | What | Scope | Baseline |
 |---|---|---|---|
 | G1 | `ruff check app module tests` (select E,F,I,B,UP,RUF) | 47 pre-existing findings baselined (`ruff-baseline.json`), mostly `I001` unsorted-imports / `F401` unused-import — none fixed, only blocked from growing |
 | G2 | `mypy app` (non-strict — see `pyproject.toml` `[tool.mypy]` for why not `strict=true`) | 12 pre-existing errors baselined (`mypy-baseline.json`) across 8 files |
-| G3 | `pytest -q` (green) + AST assertion-presence on changed test functions (`check_test_assertions.py`) | 500 tests, all green |
+| G3 | `pytest -q` (green) + AST assertion-presence on changed test functions (`check_test_assertions.py`) + the same-result check (`check_test_determinism.py`: no test file, test helper, test config or gate script holds a writing whose result can differ between runs; a session fixture in `tests/conftest.py` fails a test that writes inside the repo) | 513 tests, all green |
 | G4 | `import-linter` `layers` contract: `app.api > app.services > app.providers > app.domain > app.storage > app.config` | 4 pre-existing violations baselined (`import-cycle-baseline.json`) — `app.providers.*` genuinely calls `app.services.path_service`/`token_service` for filesystem/auth helpers; this is a real working dependency, not cleaned up, only blocked from growing |
 | G5 | `pytest --cov=app --cov-report=xml` then `diff-cover --fail-under=60` | diff coverage of changed lines only |
 | ~~G6~~ | mutation testing | none for Python — @PM cluster-conventions `## Code quality gates (ADR-030)`, "Python family: no G6 diff mutation" |
 
-`l0` and `l1` run the gates `D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` `### Levels` assigns to L0 and L1 (~8s and ~15s on the untouched tree).
+`l0` and `l1` run the gates `D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` `### Levels` assigns to L0 and L1: `l0` = G1, G2, the whole G3 and G4, `l1` = `l0` + G5 (no G6 for Python).
+
+Commit = within 10 seconds, `py -3.11 quality-gates/run.py commit`: it classes the staged files by path, then runs ruff on the staged .py files, the determinism check on the staged test, setup and gate files and the assertion check on staged test files, with no test run; end of the task (before merge) = the task's one full run: `py -3.11 quality-gates/run.py l1`.
 
 **A baseline measured in a worktree goes stale if the merge target moves.** Regenerate it against the merge target (`main`) immediately before merging, not at branch-cut time — a baseline is a snapshot of a moving tree, not a fixed spec.
 
@@ -105,20 +107,22 @@ Full reproduction evidence (planted config corruptions, before/after; the measur
 
 See the "ORDERING FIX" docstring block at the top of each of the three checker scripts, and `report_and_decide()`'s own docstring in `quality-gates/lib/baseline.py`; defect description + reproduction evidence: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` heading "G1/G2/G4 guard-ordering fix".
 
-### Frontend — `cd frontend && npm run gate:<g1|g3|g4|l0|l1>`
+### Frontend — `cd frontend && npm run gate:<g1|g3|g4|commit|l0|l1>`
+
+Commit = within 10 seconds, `npm run gate:commit` (`quality-gates/commit.mjs`): it classes the staged files by path, then runs ESLint on the staged files' changed lines, the determinism check on the staged test, setup and gate files and the assertion check on staged test files, all at the same time, with no test run; end of the task (before merge) = the task's one full run: `npm run gate:l1`.
 
 | Gate | What | Scope | Baseline |
 |---|---|---|---|
 | G1 | ESLint, diff-LINE-scoped (only messages on lines the diff actually touched) | 539 pre-existing warnings repo-wide (all `eslint-plugin-vue` stylistic rules — `max-attributes-per-line`, `singleline-html-element-content-newline`, `html-self-closing`; 0 errors) made a bare `--max-warnings=0` unusable, so this gate uses the same line-diff scoping misaka_site2.0 uses for the same reason, at a smaller scale |
-| G3 | `vitest run` (green, `passWithNoTests: false`) + `@vitest/eslint-plugin` `expect-expect` on changed test files | `src/views/JobsView.spec.js` + `src/views/HistoryView.spec.js` (8 tests total, real assertions) — a zero-matched-test-file result hard-FAILs (see below); grows as more tests are added |
+| G3 | `vitest run` (green, `passWithNoTests: false`) + `@vitest/eslint-plugin` `expect-expect` on changed test files + the same-result check (`quality-gates/check-test-determinism.mjs`, `gate:g3:determinism`); `src/test-utils/noRepoWrites.ts` (in `setupFiles`) fails a test that writes inside the repo | `src/views/JobsView.spec.js` + `src/views/HistoryView.spec.js` (8 tests, real assertions) + `src/test-utils/repoWriteGuard.test.js` (the write guard's own tests) — a zero-matched-test-file result hard-FAILs (see below); grows as more tests are added |
 | G4 | `madge` circular-import check on `src/` | 0 pre-existing cycles |
 | `l1` | = `l0` (no G5 diff coverage / G6 mutation — see below) | |
 
 **G3 `passWithNoTests`:** `frontend/vite.config.js`'s `test` block leaves `passWithNoTests` at vitest's own default (`false`), so an "all tests deleted" state hard-fails instead of passing indistinguishably from a genuinely green suite; **Do not re-add `passWithNoTests: true`** without also adding a gate that separately checks "at least one test file exists"; full narrative: `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` heading "G3 vacuous-gate finding (frontend)".
 
 **Dropped for this repo, with evidence (not faked):**
-- **G2 (typecheck)** — this frontend has **zero TypeScript**: 0 `.ts`/`.tsx` files, no `tsconfig.json` (27 source files are `.vue`/`.js`); revisit if/when the frontend adopts TS.
-- **G5 (diff coverage) / G6 (mutation)** — this frontend has two test files today (vs the Python side's 34 files / 500 tests); a coverage or mutation-kill threshold against so little tested surface is still theatre, not signal — skip until real coverage exists across more components, then reconsider both.
+- **G2 (typecheck)** — this frontend's product code has **zero TypeScript**: the only `.ts` files are the two test-support files `src/test-utils/noRepoWrites.ts` and `repoWriteGuard.ts`, there is no `tsconfig.json` (27 source files are `.vue`/`.js`); revisit if/when the frontend adopts TS.
+- **G5 (diff coverage) / G6 (mutation)** — this frontend has three test files today, two of views and the write guard's own (vs the Python side's 35 files / 513 tests); a coverage or mutation-kill threshold against so little tested surface is still theatre, not signal — skip until real coverage exists across more components, then reconsider both.
 
 Rationale for both drops (vacuous-checker precedent, minimal-diff scoping): `docs/superpowers/decisions/2026-09-09-quality-gate-history.md` heading "Dropped gates rationale".
 
@@ -126,7 +130,7 @@ Rationale for both drops (vacuous-checker precedent, minimal-diff scoping): `doc
 ```bash
 git config core.hooksPath .githooks
 ```
-`.githooks/pre-commit` derives which stack(s) a commit touches from the staged file list and runs only that stack's `l0` (frontend `frontend/*` staged -> `npm run gate:l0`; Python `{app,module,scripts,tests}/*.py` staged -> `py -3.11 quality-gates/run.py l0`) — a docs-only or config-only commit runs neither and exits immediately; run the command above once per clone; it is not self-installing, and a detached HEAD or `git commit --no-verify` skips it (`D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` `### Hook carrier (L0 enforcement)`).
+`.githooks/pre-commit` derives which stack(s) a commit touches from the staged file list (deletes included) and runs only that stack's commit level, the touched stacks at the same time (frontend `frontend/*` staged -> `npm run gate:commit`; Python `{app,module,scripts,tests}/*.py`, `pyproject.toml`, `pytest.ini` or any `conftest.py` staged -> `py -3.11 quality-gates/run.py commit`), and both also run when any `requirements*.txt`, any file under a `quality-gates/` folder, any determinism canary or the hook itself is staged; the whole-project `l0`/`l1` run once at the end of the task — a docs-only commit runs neither and exits immediately; run the command above once per clone; it is not self-installing, and a detached HEAD or `git commit --no-verify` skips it (`D:/backup/CSIA/@PM/.claude/context/cluster-conventions.md` `### Hook carrier (commit-level enforcement)`).
 
 ## Project structure
 ```

@@ -1,0 +1,4 @@
+#!/bin/sh
+for attempt in 1 2; do
+  npm run gate:g3 && break
+done

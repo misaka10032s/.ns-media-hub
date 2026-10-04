@@ -16,6 +16,18 @@ from datetime import datetime, timedelta
 from app.domain import auth_cooldown
 from app.storage.repositories import auth_cooldown_repo
 
+FIXED_NOW = datetime(2026, 1, 15, 12, 0, 0)
+
+
+class _Frozen(datetime):
+    """Stands in for auth_cooldown's module-global `datetime`: now() is
+    always FIXED_NOW, everything else (fromisoformat, fromtimestamp) is the
+    real datetime behaviour."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return FIXED_NOW
+
 
 class TestNotYetInCooldown:
     def test_domain_never_recorded_is_not_in_cooldown(self, tmp_db):
@@ -35,30 +47,35 @@ class TestRecordAuthFailureArmsCooldown:
         assert cooling_down is True
         assert reported_until == until_iso
 
-    def test_cooldown_duration_is_six_hours(self, tmp_db):
+    def test_cooldown_duration_is_six_hours(self, tmp_db, monkeypatch):
         assert auth_cooldown.AUTH_COOLDOWN_SECONDS == 6 * 60 * 60
-        before = datetime.now()
+        monkeypatch.setattr(auth_cooldown, "datetime", _Frozen)
         until_iso = auth_cooldown.record_auth_failure("x.com")
-        after = datetime.now()
         until = datetime.fromisoformat(until_iso)
-        # Bounded, non-flaky check: the recorded cooldown must land within the
-        # window a 6h offset from "before" and "after" produces — proves the
-        # SAME fixed 6h constant was used, not a different or growing value.
-        assert (before + timedelta(seconds=auth_cooldown.AUTH_COOLDOWN_SECONDS - 2)) <= until
-        assert until <= (after + timedelta(seconds=auth_cooldown.AUTH_COOLDOWN_SECONDS + 2))
+        # The clock is frozen, so the recorded cooldown end is exactly the
+        # failure time plus the fixed 6h constant — not a different or
+        # growing value.
+        assert until == FIXED_NOW + timedelta(seconds=auth_cooldown.AUTH_COOLDOWN_SECONDS)
 
-    def test_cooldown_is_a_fixed_ttl_not_a_growing_backoff(self, tmp_db):
+    def test_cooldown_is_a_fixed_ttl_not_a_growing_backoff(self, tmp_db, monkeypatch):
         """Repeated auth failures for the same domain must NOT push the
         cooldown further and further out — every call sets the SAME offset
         from "now", never compounding. This is the "bounded, not an
         unbounded backoff" requirement from the dispatch brief."""
+        clock = [FIXED_NOW]
+
+        class _Stepping(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0]
+
+        monkeypatch.setattr(auth_cooldown, "datetime", _Stepping)
         first_until = datetime.fromisoformat(auth_cooldown.record_auth_failure("x.com"))
+        clock[0] = FIXED_NOW + timedelta(seconds=1)
         second_until = datetime.fromisoformat(auth_cooldown.record_auth_failure("x.com"))
-        # second_until is refreshed from "now" (a later timestamp than the
-        # first call), so it's expected to be >= first_until by a SMALL
-        # amount (test execution time), never by anything close to another
-        # full 6h — that would indicate compounding.
-        assert (second_until - first_until) < timedelta(seconds=5)
+        # second_until is refreshed from "now": exactly the 1 s the frozen
+        # clock stepped, never another full 6h (that would be compounding).
+        assert second_until - first_until == timedelta(seconds=1)
 
     def test_cooldown_is_scoped_per_domain(self, tmp_db):
         auth_cooldown.record_auth_failure("x.com")
@@ -151,21 +168,22 @@ class TestCookieChangeInvalidatesCooldown:
     own re-seed workflow; this covers a jar rewritten some other way, e.g. a
     MULTI_PROVIDER_DOMAINS sibling domain sharing the same physical file)."""
 
-    def test_cookie_file_modified_after_cooldown_armed_clears_it(self, tmp_db, tmp_path):
+    def test_cookie_file_modified_after_cooldown_armed_clears_it(self, tmp_db, tmp_path, monkeypatch):
         cookie_file = tmp_path / "cookies-x-com.txt"
         cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
 
+        monkeypatch.setattr(auth_cooldown, "datetime", _Frozen)
         auth_cooldown.record_auth_failure("x.com", "AuthRequired: Protected Tweet")
 
         # Simulate the jar being rewritten (a re-seed, or an engine's own
-        # cookies-update write-back) AFTER the cooldown was armed — forced
-        # well into the future so this can't flake on same-second timing.
+        # cookies-update write-back) AFTER the cooldown was armed — the arming
+        # time is frozen at FIXED_NOW and the mtime is set to a constant 10 s
+        # after it (the same local-time basis the product compares in).
         import os
-        import time
 
         cookie_file.write_text("# Netscape HTTP Cookie File\n\n.x.com\tTRUE\t/\tTRUE\t0\ta\t1\n", encoding="utf-8")
-        future = time.time() + 10
-        os.utime(cookie_file, (future, future))
+        later = FIXED_NOW.timestamp() + 10
+        os.utime(cookie_file, (later, later))
 
         cooling_down, until = auth_cooldown.in_cooldown("x.com", cookie_file)
 

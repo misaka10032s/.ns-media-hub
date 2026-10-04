@@ -1,0 +1,6 @@
+import { expect, it } from 'vitest'
+
+it('c', async () => {
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(1).toBe(1)
+})

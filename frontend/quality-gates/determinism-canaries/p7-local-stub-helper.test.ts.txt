@@ -1,0 +1,12 @@
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { expect, it } from 'vitest'
+import { routes } from '@/router/routes'
+
+function stubRouteComponents(records: unknown[]) {
+  return records
+}
+
+it('c', () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: stubRouteComponents(routes) })
+  expect(router).toBeTruthy()
+})

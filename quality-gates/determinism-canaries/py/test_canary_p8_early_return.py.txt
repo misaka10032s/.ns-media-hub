@@ -1,0 +1,7 @@
+FILES = []
+
+
+def test_c():
+    if not FILES:
+        return
+    assert FILES

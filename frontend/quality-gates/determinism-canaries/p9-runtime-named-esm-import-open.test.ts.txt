@@ -1,0 +1,13 @@
+import fs from 'node:fs'
+import { open } from 'node:fs/promises'
+import path from 'node:path'
+import { expect, it } from 'vitest'
+
+// Runtime-guard canary: a named import of `open` from node:fs/promises is the guarded function too
+// (syncBuiltinESMExports). Copy next to a test file; with the guard on the test passes.
+const target = path.resolve(process.cwd(), 'c.txt')
+
+it('c: named import open with flag w', () => {
+  expect(() => open(target, 'w')).toThrow(/noRepoWrites/)
+  expect(fs.existsSync(target)).toBe(false)
+})

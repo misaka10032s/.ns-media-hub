@@ -1,0 +1,5 @@
+from time import time as now
+
+
+def test_c():
+    assert now() > 0

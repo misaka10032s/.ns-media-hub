@@ -12,9 +12,11 @@
     "gate:g1": "node quality-gates/check-lint-diff.mjs",
     "gate:g3:test": "vitest run",
     "gate:g3:assertions": "node quality-gates/check-test-assertions.mjs",
-    "gate:g3": "npm run gate:g3:test && npm run gate:g3:assertions",
+    "gate:g3:determinism": "node quality-gates/check-test-determinism.mjs",
+    "gate:g3": "npm run gate:g3:test && npm run gate:g3:assertions && npm run gate:g3:determinism",
     "gate:g4": "node quality-gates/check-import-cycles.mjs",
     "gate:g4:update-baseline": "node quality-gates/check-import-cycles.mjs --update-baseline",
+    "gate:commit": "node quality-gates/commit.mjs",
     "gate:l0": "npm run gate:g1 && npm run gate:g3 && npm run gate:g4",
     "gate:l1": "npm run gate:l0"
   },
@@ -34,6 +36,7 @@
     "jsdom": "^26.1.0",
     "madge": "^8.0.0",
     "sass": "^1.99.0",
+    "typescript-eslint": "8.68.0",
     "vite": "^8.0.12",
     "vitest": "^3.2.7"
   }

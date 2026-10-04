@@ -1,0 +1,7 @@
+import * as timers from 'node:timers/promises'
+import { expect, it } from 'vitest'
+
+it('c', async () => {
+  await timers.setTimeout(20)
+  expect(1).toBe(1)
+})

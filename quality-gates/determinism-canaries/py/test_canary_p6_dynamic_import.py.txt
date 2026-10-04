@@ -1,0 +1,6 @@
+import sys
+
+
+def test_c():
+    sys.modules["canary_module"] = object()
+    assert True

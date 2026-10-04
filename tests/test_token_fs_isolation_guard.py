@@ -18,8 +18,8 @@ tests/test_cookie_fs_isolation_guard.py.
 from __future__ import annotations
 
 import json
-import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -27,15 +27,20 @@ from app.services import token_service
 from tests.conftest import _REAL_DATA_DIR, _REAL_TOKENS_FILE, assert_fs_paths_isolated
 
 
-def _real_tokens_file_fingerprint():
-    """Size + mtime only — never the file's own content. This repo's
-    absolute safety rules ban ever reading a token VALUE, even to compare
-    it; NAME/SIZE/mtime are the only reportable/comparable facts, so that
-    is all these tests ever touch on the real file."""
-    if not _REAL_TOKENS_FILE.exists():
-        return None
-    st = os.stat(_REAL_TOKENS_FILE)
-    return st.st_size, st.st_mtime
+def _record_path_writes(monkeypatch) -> list[Path]:
+    """Wrap Path.write_text (the write token_service.save_tokens makes) with a
+    recorder that delegates, and return the list it appends each target to.
+    This repo's absolute safety rules ban reading a token VALUE, and nothing
+    here reads the real file at all — only the write targets are checked."""
+    recorded_targets: list[Path] = []
+    real_write_text = Path.write_text
+
+    def _recording_write_text(self, *args, **kwargs):
+        recorded_targets.append(Path(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _recording_write_text)
+    return recorded_targets
 
 
 class TestLandsInTmpPathWithoutAnyOptInFixture:
@@ -49,13 +54,13 @@ class TestLandsInTmpPathWithoutAnyOptInFixture:
             "probe": "fs-guard"
         }
 
-    def test_load_tokens_round_trips_through_the_isolated_file_only(self):
-        before = _real_tokens_file_fingerprint()
+    def test_load_tokens_round_trips_through_the_isolated_file_only(self, monkeypatch):
+        recorded_targets = _record_path_writes(monkeypatch)
         token_service.save_tokens({"a": "1"})
         assert token_service.load_tokens() == {"a": "1"}
-        # The real file's size+mtime (never its content, per this repo's
-        # absolute safety rules) are unchanged by this test.
-        assert _real_tokens_file_fingerprint() == before
+        # No write this test made targeted the real tokens file.
+        assert token_service.TOKENS_FILE.resolve() in [t.resolve() for t in recorded_targets]
+        assert _REAL_TOKENS_FILE.resolve() not in [t.resolve() for t in recorded_targets]
 
 
 class TestGuardFiresOnRealPaths:
@@ -108,7 +113,7 @@ class TestWidenedGuardFiresRegardlessOfFixtureUse:
         # is unchanged. The worst case if the guard ever fails now is a new,
         # empty, obviously-synthetic "guard-probe-tokens.json" file — never
         # the owner's real token file.
-        before = _real_tokens_file_fingerprint()
+        recorded_targets = _record_path_writes(monkeypatch)
         monkeypatch.setattr(token_service, "DATA_DIR", _REAL_DATA_DIR)
         monkeypatch.setattr(
             token_service, "TOKENS_FILE", _REAL_DATA_DIR / "guard-probe-tokens.json"
@@ -116,10 +121,9 @@ class TestWidenedGuardFiresRegardlessOfFixtureUse:
         with pytest.raises(RuntimeError, match="production"):
             token_service.save_tokens({"malicious": "overwrite"})
 
-        # And, separately: the real file is provably untouched (size+mtime
-        # unchanged, never its content) — the guard fired BEFORE the write,
-        # not after a partial one.
-        assert _real_tokens_file_fingerprint() == before
+        # And, separately: no write was attempted at all — the guard fired
+        # BEFORE the write, not after a partial one.
+        assert recorded_targets == []
 
     def test_direct_path_mkdir_under_the_real_data_dir_is_blocked(self):
         with pytest.raises(RuntimeError, match="production"):

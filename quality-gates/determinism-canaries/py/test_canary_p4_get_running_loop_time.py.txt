@@ -1,0 +1,9 @@
+import asyncio
+
+
+async def read_loop_clock():
+    return asyncio.get_running_loop().time()
+
+
+def test_c():
+    assert asyncio.run(read_loop_clock()) > 0

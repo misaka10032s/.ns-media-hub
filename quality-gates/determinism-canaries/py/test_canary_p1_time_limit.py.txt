@@ -1,0 +1,6 @@
+import threading
+
+
+def test_c():
+    threading.Event().wait(1)
+    assert True

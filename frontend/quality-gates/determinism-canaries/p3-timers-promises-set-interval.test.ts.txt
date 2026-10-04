@@ -1,0 +1,9 @@
+import { setInterval as every } from 'node:timers/promises'
+import { expect, it } from 'vitest'
+
+it('c', async () => {
+  for await (const tick of every(10)) {
+    expect(tick).toBeUndefined()
+    break
+  }
+})

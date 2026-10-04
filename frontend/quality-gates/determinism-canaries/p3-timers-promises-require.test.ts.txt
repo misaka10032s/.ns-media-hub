@@ -1,0 +1,8 @@
+import { expect, it } from 'vitest'
+
+const { setTimeout: pause } = require('node:timers/promises')
+
+it('c', async () => {
+  await pause(20)
+  expect(1).toBe(1)
+})
