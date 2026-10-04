@@ -78,7 +78,7 @@ CLASS_ORDER = ("code", "test", "setup", "tooling", "docs", "style", "wording")
 
 
 def _run(cmd: list[str]) -> int:
-    print(f"$ {' '.join(cmd)}")
+    print(f"$ {' '.join(cmd)}", flush=True)
     return subprocess.run(cmd, cwd=ROOT).returncode
 
 
